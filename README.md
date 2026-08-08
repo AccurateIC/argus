@@ -4,6 +4,12 @@
 
 ### The AI code reviewer that *actually reviews.*
 
+[![release](https://img.shields.io/github/v/release/karlmehta/argus?color=7c3aed)](https://github.com/karlmehta/argus/releases)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
+[![built with Claude](https://img.shields.io/badge/built%20with-Claude-8A2BE2)](https://www.anthropic.com/claude)
+[![stars](https://img.shields.io/github/stars/karlmehta/argus?style=social)](https://github.com/karlmehta/argus/stargazers)
+
 **Argus** is a self-hostable, model-agnostic PR-review agent for GitHub. It reads your diff the way a senior engineer does — across security, data-protection, correctness, performance, tests, and API-compatibility — remembers your codebase's conventions between reviews, and leaves a precise, cited, severity-ranked verdict instead of a rubber stamp.
 
 Named for [Argus Panoptes](https://en.wikipedia.org/wiki/Argus_Panoptes), the hundred-eyed watchman who never slept.
@@ -97,6 +103,45 @@ Prefer to vendor it? Copy [`.github/workflows/argus-review.yml`](.github/workflo
 ```
 
 The full data-flow and extension points are in [`docs/architecture.md`](docs/architecture.md).
+
+---
+
+## 👀 What a review looks like
+
+> Posted by `argus[bot]` on a real PR — every finding is severity-tagged and cited.
+
+```markdown
+## 🛡️ Argus review
+
+**Verdict:** REQUEST CHANGES  ·  1 blocker · 1 major · 2 minor · 1 nit
+
+### Findings
+| Sev | Skill | Location | Finding |
+|-----|-------|----------|---------|
+| 🔴 blocker | security | api/invites/views.py:212 | `Invite.objects.get(pk=…)` isn't scoped to the caller's org → any user can accept another org's invite by id (IDOR). Scope by `request.user`'s org. |
+| 🟠 major | concurrency | billing/credits.py:88 | `c = get(); c.balance -= n; c.save()` is a non-atomic read-modify-write — two concurrent spends lose an update. Use `select_for_update()` or an atomic `F()` decrement. |
+| 🟡 minor | tests | — | The new `expired` branch in `accept()` has no test; add one that would fail without the guard. |
+| 🟡 minor | observability | tasks/webhook.py:41 | `except Exception: pass` swallows delivery failures silently — log with the event id. |
+| ⚪ nit | correctness | serializers.py:19 | Redundant `list()` around a comprehension. |
+
+### Questions
+- `serializers.py:33` adds `email` to `PublicUserSerializer` — is this serializer used on any unauthenticated endpoint? If so it's a data-protection blocker.
+
+### 📝 Memory suggestion
+- You've accepted raw SQL in `analytics/queries/` twice now — want me to add it to `accepted-patterns.md` so I stop flagging it?
+```
+
+---
+
+## 🆚 Why not just a summarizer bot?
+
+| | Generic "AI review" bot | **Argus** |
+|---|---|---|
+| Output | prose summary + a few nits | severity-ranked, `file:line`-cited findings per skill |
+| Consistency | different every run | explicit, versioned **skills** you can read and extend |
+| False positives | forever | **memory** kills repeats; a calibration pass cuts low-confidence noise |
+| Trust to block/approve | none | honest verdict + documented **governance** (approval off by default) |
+| Ownership | opaque prompt | skills/prompts/memory/config are Markdown **in your repo** |
 
 ---
 
