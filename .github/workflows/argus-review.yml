@@ -23,7 +23,7 @@ on:
         type: string
         default: config/argus.yml
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -96,4 +96,4 @@ jobs:
 
             Be concrete, cite file:line, and prefer precision over volume.
           claude_args: >-
-            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
+            --model claude-sonnet-4-6 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
