@@ -1,0 +1,64 @@
+# Argus configuration. Everything the reviewer's behavior depends on lives here so
+# it's reviewable in a PR like any other change.
+
+version: 1
+
+# Which review skills run, in priority order. Comment out any you don't want.
+skills:
+  - security
+  - data-protection
+  - correctness
+  - concurrency
+  - performance
+  - api-compat
+  - tests
+  - observability
+  - dependencies
+  # - your-custom-skill        # add skills/your-custom-skill.md and list it here
+
+# Severity gate: the lowest severity that causes a "request changes" verdict.
+# One of: blocker | major | minor. Default: major.
+gate: major
+
+verdict:
+  # OFF by default. When false, Argus only comments or requests changes — it never
+  # approves. Turning this on lets argus[bot] submit an APPROVE review; whether that
+  # approval counts toward branch protection is a separate repo-owner decision.
+  # READ docs/governance.md before enabling.
+  allow_approve: false
+  # Never approve PRs opened by these actors (bots/automation).
+  never_approve_authors:
+    - "dependabot[bot]"
+    - "renovate[bot]"
+    - "argus[bot]"
+
+# Path rules. Globs are matched against changed file paths.
+paths:
+  # Skip entirely (generated, vendored, lockfiles). No findings raised here.
+  skip:
+    - "**/*.lock"
+    - "**/vendor/**"
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/*.min.js"
+    - "**/__generated__/**"
+    - "**/migrations/**/*.py"     # reviewed by api-compat, but not style-nitted
+  # Raise the bar: in these dirs, drop every finding one severity higher and be
+  # extra thorough on security/data-protection.
+  strict:
+    - "**/auth/**"
+    - "**/billing/**"
+    - "**/payments/**"
+    - "**/*permission*"
+    - "**/*tenant*"
+
+# Keep reviews readable. Max inline comments before Argus rolls the rest into the
+# summary table (prevents 40-comment noise-bombs).
+limits:
+  max_inline_comments: 15
+  # Skip review entirely for PRs larger than this many changed lines and instead
+  # post a note asking for the PR to be split (huge PRs get shallow reviews).
+  max_diff_lines: 4000
+
+# Model selection. Omit to inherit the action's default.
+model: ""   # e.g. "claude-opus-4-8" for deep reviews, a faster model for high volume

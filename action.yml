@@ -1,0 +1,39 @@
+name: "Argus"
+description: "The AI code reviewer that actually reviews — skills, memory, and an honest verdict."
+author: "pdxlab"
+branding:
+  icon: "eye"
+  color: "purple"
+
+inputs:
+  anthropic_api_key:
+    description: "Anthropic API key (or use claude_code_oauth_token)."
+    required: false
+  claude_code_oauth_token:
+    description: "Claude Code OAuth token from `claude setup-token` (takes precedence)."
+    required: false
+  config-path:
+    description: "Path to argus.yml."
+    required: false
+    default: "config/argus.yml"
+  model:
+    description: "Override the review model (else taken from config)."
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Run Argus
+      uses: anthropics/claude-code-action@v1
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        prompt: |
+          You are Argus. Follow prompts/system.md, load ${{ inputs.config-path }},
+          the enabled skills/, and memory/, then review this PR per prompts/verdict.md.
+          Never approve merely to clear a required-review gate.
+        claude_args: >-
+          --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"

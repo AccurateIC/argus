@@ -1,0 +1,99 @@
+name: Argus Review
+
+# Reusable + standalone PR-review workflow.
+#
+# Argus reads the diff and the surrounding code, applies each enabled review
+# skill, cross-checks against the repo's memory, and posts ONE consolidated
+# review with severity-ranked, file:line-cited findings.
+#
+# Verdict policy (see docs/governance.md):
+#   • request-changes  — when a `blocker`/`major` finding is confirmed
+#   • comment          — the default: findings surfaced, human sign-off still required
+#   • approve          — OFF by default. Only enabled when a maintainer sets
+#                        `verdict.allow_approve: true` in config/argus.yml AND the
+#                        change is genuinely clean. Argus never approves to merely
+#                        clear a required-review gate; whether a bot approval counts
+#                        toward branch protection is a repo-owner decision.
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: Path to argus.yml
+        type: string
+        default: config/argus.yml
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+concurrency:
+  group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Non-draft same-repo PRs (forks can't read secrets) + explicit "@argus" mentions.
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '@argus'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for conflict + base-diff analysis)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Argus
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Either secret works; CLAUDE_CODE_OAUTH_TOKEN takes precedence if set.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are **Argus**, this repository's automated PR reviewer.
+            Review pull request #${{ github.event.pull_request.number || github.event.issue.number }}.
+
+            Follow the harness instructions exactly:
+
+            1. Read `prompts/system.md` — it defines your persona, rules, and
+               the hard line that you never approve to merely clear a gate.
+            2. Read `config/argus.yml` to learn which skills are enabled, the
+               severity gate, and path rules (skip/strict globs).
+            3. Load every enabled skill from `skills/<name>.md`. Each is a rubric.
+            4. Load repo memory: `memory/conventions.md`,
+               `memory/accepted-patterns.md`, and any relevant `memory/knowledge/*`.
+               Treat accepted-patterns as authoritative — do NOT re-flag them.
+            5. Get the diff: `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }}`.
+               Read the surrounding code (not just diff hunks) for anything you're
+               unsure about — false positives from missing context are the #1 way
+               reviewers lose trust.
+            6. For each enabled skill, apply its rubric and collect findings.
+               Dedupe across skills. Assign each finding a severity
+               (blocker | major | minor | nit) and a `file:line` citation.
+            7. Follow `prompts/verdict.md` to decide + submit the review:
+               - Post concise inline comments for real issues only.
+               - Post a summary keyed by skill, with a findings table.
+               - If any confirmed blocker/major → `gh pr review <n> --request-changes`.
+               - Else → `gh pr review <n> --comment`.
+               - Only `--approve` if `verdict.allow_approve: true` in config AND you
+                 have zero blocker/major findings AND you would genuinely sign off.
+            8. If you notice a pattern the repo keeps accepting, or a convention
+               worth recording, add a short "📝 Memory suggestion" section — a human
+               will decide whether to merge it into `memory/`.
+
+            Be concrete, cite file:line, and prefer precision over volume.
+          claude_args: >-
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
