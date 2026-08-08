@@ -52,7 +52,7 @@ permissions:
   pull-requests: write
 jobs:
   review:
-    uses: pdxlab/argus/.github/workflows/argus-review.yml@v1
+    uses: karlmehta/argus/.github/workflows/argus-review.yml@v1
     secrets: inherit
 ```
 

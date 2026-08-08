@@ -58,4 +58,4 @@ event ─▶ harness ─▶ [ system + review prompts ]
   `config/` unchanged.
 - **New review lens:** add a skill (see [configuration](configuration.md)).
 - **Org-wide policy:** vendor `skills/` and `config/` into a shared repo and
-  reference it from each project's workflow.
+  reference it from each project’s workflow.
