@@ -34,7 +34,18 @@ Most "AI PR review" bots summarize the diff and post a few generic nits. Argus i
 
 ## ✨ Quickstart
 
-**1. Add the token.** Argus runs on any Claude-compatible backend. Add one repo/org secret:
+Argus supports two backends via [`config/argus.yml`](config/argus.yml) `backend:` — **`ollama`** (LAN/local) or **`claude`** (Anthropic). Skills/prompts/memory are shared.
+
+### Option A — Ollama (no Anthropic bill)
+
+1. Serve a model (e.g. `qwen3.6:27b`) and set `ollama.host` / `ollama.model` in `config/argus.yml`.
+2. Install a **self-hosted** GitHub Actions runner on a machine that can reach that host.
+3. Keep `backend: ollama`. Vendor or use this repo’s workflow as-is.
+4. Open a PR — [`scripts/argus_ollama.py`](scripts/argus_ollama.py) posts the review.
+
+### Option B — Claude (paid API)
+
+**1. Add the token.** Add one repo/org secret:
 
 ```bash
 # easiest for Claude Code users — a long-lived OAuth token:
@@ -44,7 +55,9 @@ gh secret set CLAUDE_CODE_OAUTH_TOKEN --org <your-org> --visibility all
 gh secret set ANTHROPIC_API_KEY --repo <owner>/<repo>
 ```
 
-**2. Drop in the workflow** (`.github/workflows/argus.yml`):
+**2. Set `backend: claude`** in [`config/argus.yml`](config/argus.yml).
+
+**3. Drop in the workflow** (`.github/workflows/argus.yml`) if calling the reusable workflow:
 
 ```yaml
 name: Argus review
@@ -62,9 +75,9 @@ jobs:
     secrets: inherit
 ```
 
-**3. Open a PR.** Argus posts a review within a couple of minutes. That's it.
+**4. Open a PR.** Argus posts a review within a couple of minutes.
 
-Prefer to vendor it? Copy [`.github/workflows/argus-review.yml`](.github/workflows/argus-review.yml) and the [`skills/`](skills), [`prompts/`](prompts), [`config/`](config), and [`memory/`](memory) folders into your repo and tune [`config/argus.yml`](config/argus.yml).
+Prefer to vendor it? Copy [`.github/workflows/argus-review.yml`](.github/workflows/argus-review.yml), [`scripts/`](scripts), and the [`skills/`](skills), [`prompts/`](prompts), [`config/`](config), and [`memory/`](memory) folders into your repo and tune [`config/argus.yml`](config/argus.yml).
 
 ---
 

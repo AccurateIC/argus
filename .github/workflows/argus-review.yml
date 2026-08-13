@@ -2,18 +2,14 @@ name: Argus Review
 
 # Reusable + standalone PR-review workflow.
 #
-# Argus reads the diff and the surrounding code, applies each enabled review
-# skill, cross-checks against the repo's memory, and posts ONE consolidated
-# review with severity-ranked, file:line-cited findings.
+# Backends (config/argus.yml → backend):
+#   • ollama — scripts/argus_ollama.py against a LAN/local Ollama (needs self-hosted runner)
+#   • claude — anthropics/claude-code-action (needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)
 #
 # Verdict policy (see docs/governance.md):
-#   • request-changes  — when a `blocker`/`major` finding is confirmed
+#   • request-changes  — when a finding at/above `gate` is confirmed
 #   • comment          — the default: findings surfaced, human sign-off still required
-#   • approve          — OFF by default. Only enabled when a maintainer sets
-#                        `verdict.allow_approve: true` in config/argus.yml AND the
-#                        change is genuinely clean. Argus never approves to merely
-#                        clear a required-review gate; whether a bot approval counts
-#                        toward branch protection is a repo-owner decision.
+#   • approve          — OFF by default (verdict.allow_approve: true)
 
 on:
   workflow_call:
@@ -23,7 +19,7 @@ on:
         type: string
         default: config/argus.yml
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -39,8 +35,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  review:
-    # Non-draft same-repo PRs (forks can't read secrets) + explicit "@argus" mentions.
+  # Read backend from config so Ollama jobs land on self-hosted (LAN) and Claude
+  # can use GitHub-hosted runners.
+  resolve:
     if: >
       (github.event_name == 'workflow_dispatch') ||
       (github.event_name == 'pull_request' &&
@@ -50,13 +47,43 @@ jobs:
         github.event.issue.pull_request != null &&
         contains(github.event.comment.body, '@argus'))
     runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.cfg.outputs.backend }}
+      config_path: ${{ steps.cfg.outputs.config_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          CONFIG_PATH="${{ github.event_name == 'workflow_call' && inputs.config-path || 'config/argus.yml' }}"
+          if [ ! -f "$CONFIG_PATH" ]; then
+            echo "Missing $CONFIG_PATH" >&2
+            exit 1
+          fi
+          BACKEND=$(awk '/^backend:/{print $2; exit}' "$CONFIG_PATH" | tr -d '"' | tr -d "'")
+          BACKEND="${BACKEND:-claude}"
+          echo "backend=$BACKEND" >> "$GITHUB_OUTPUT"
+          echo "config_path=$CONFIG_PATH" >> "$GITHUB_OUTPUT"
+          echo "Argus backend=$BACKEND config=$CONFIG_PATH"
+
+  review:
+    needs: resolve
+    runs-on: ${{ needs.resolve.outputs.backend == 'ollama' && 'self-hosted' || 'ubuntu-latest' }}
     steps:
       - name: Checkout (full history for conflict + base-diff analysis)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run Argus
+      - name: Run Argus (Ollama)
+        if: needs.resolve.outputs.backend == 'ollama'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          ARGUS_CONFIG: ${{ needs.resolve.outputs.config_path }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/argus_ollama.py
+
+      - name: Run Argus (Claude)
+        if: needs.resolve.outputs.backend == 'claude'
         uses: anthropics/claude-code-action@v1
         with:
           # Either secret works; CLAUDE_CODE_OAUTH_TOKEN takes precedence if set.
@@ -70,7 +97,7 @@ jobs:
 
             1. Read `prompts/system.md` — it defines your persona, rules, and
                the hard line that you never approve to merely clear a gate.
-            2. Read `config/argus.yml` to learn which skills are enabled, the
+            2. Read `${{ needs.resolve.outputs.config_path }}` to learn which skills are enabled, the
                severity gate, and path rules (skip/strict globs).
             3. Load every enabled skill from `skills/<name>.md`. Each is a rubric.
             4. Load repo memory: `memory/conventions.md`,

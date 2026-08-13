@@ -3,6 +3,10 @@
 
 version: 1
 
+# Backend: ollama (local/LAN, free) or claude (Anthropic API / Claude Code Action).
+# Switch to claude when you have an ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN.
+backend: ollama
+
 # Which review skills run, in priority order. Comment out any you don't want.
 skills:
   - security
@@ -60,5 +64,14 @@ limits:
   # post a note asking for the PR to be split (huge PRs get shallow reviews).
   max_diff_lines: 4000
 
-# Model selection. Omit to inherit the action's default.
-model: "claude-sonnet-4-6"   # Sonnet: strong reviewer at ~1/5 Opus cost   # e.g. "claude-opus-4-8" for deep reviews, a faster model for high volume
+# Claude model (used when backend: claude). Omit to inherit the action's default.
+model: "claude-sonnet-4-6"
+
+# Ollama settings (used when backend: ollama). Requires a self-hosted runner that
+# can reach host (GitHub-hosted ubuntu-latest cannot see a LAN IP).
+ollama:
+  host: "http://192.168.10.46:11434"
+  model: "qwen3.6:27b"
+
+# Add ANTHROPIC_API_KEY (or OAuth token). No skill rewrites.
+

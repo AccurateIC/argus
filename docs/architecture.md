@@ -5,14 +5,15 @@ Argus is three thin layers around a model. The intelligence is in the **skills**
 
 ## Layers
 
-### 1. Harness (`.github/workflows/argus-review.yml`, `action.yml`)
+### 1. Harness (`.github/workflows/argus-review.yml`, `action.yml`, `scripts/argus_ollama.py`)
 Triggered by PR events or an `@argus` mention. Responsibilities:
 - check out the repo with full history (needed for base-diff + conflict analysis),
-- provide the model with tools: `gh pr diff/view/review/comment`, `Read`, `Grep`,
-  `Glob`,
-- hand the model the review instructions.
+- select backend from `config/argus.yml` (`claude` or `ollama`),
+- **claude:** provide tools via Claude Code Action (`gh`, `Read`, `Grep`, `Glob`),
+- **ollama:** one-shot review via [`scripts/argus_ollama.py`](../scripts/argus_ollama.py)
+  against a LAN/local Ollama (self-hosted runner required).
 
-Stateless and model-agnostic. Swap the backend by changing one `uses:` line.
+Stateless. Swap backends with `backend:` in config — skills/prompts/memory stay put.
 
 ### 2. Reviewer (`prompts/`, `skills/`, `config/`, `memory/`)
 The model, instructed by `prompts/system.md` + `prompts/review.md`, runs the 5-pass
