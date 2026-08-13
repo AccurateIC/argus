@@ -80,6 +80,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           ARGUS_CONFIG: ${{ needs.resolve.outputs.config_path }}
           GH_TOKEN: ${{ github.token }}
+          # 27B reviews of big prompts can take >10m; stream + long overall budget.
+          OLLAMA_TIMEOUT: "1800"
+          OLLAMA_CHUNK_TIMEOUT: "180"
         run: python3 scripts/argus_ollama.py
 
       - name: Run Argus (Claude)

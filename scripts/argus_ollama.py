@@ -180,12 +180,25 @@ def filter_diff(diff: str, skip: list[str]) -> str:
 
 
 def ollama_chat(host: str, model: str, system: str, user: str) -> str:
+    """Call Ollama with streaming so long generations don't hit a single read timeout."""
+    import time
+
     url = host.rstrip("/") + "/api/chat"
+    # Overall wall clock; per-chunk socket timeout. Override via env if needed.
+    overall_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "1800"))
+    chunk_timeout = int(os.environ.get("OLLAMA_CHUNK_TIMEOUT", "120"))
     payload = {
         "model": model,
-        "stream": False,
+        "stream": True,
         "format": "json",
-        "options": {"temperature": 0.1},
+        # qwen3.6 streams into message.thinking by default; that burns the
+        # budget with 0 content chars. Force answer tokens into content.
+        "think": False,
+        "options": {
+            "temperature": 0.1,
+            # Cap output so a runaway model can't sit for hours.
+            "num_predict": int(os.environ.get("OLLAMA_NUM_PREDICT", "4096")),
+        },
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -195,15 +208,65 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
     )
+    parts: list[str] = []
+    thinking_chars = 0
+    started = time.monotonic()
+    last_log = started
     try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=chunk_timeout) as resp:
+            while True:
+                if time.monotonic() - started > overall_timeout:
+                    die(
+                        f"ollama overall timeout after {overall_timeout}s "
+                        f"(partial chars={sum(len(p) for p in parts)}, thinking={thinking_chars})"
+                    )
+                raw = resp.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = obj.get("message") or {}
+                piece = msg.get("content") or obj.get("response") or ""
+                think_piece = msg.get("thinking") or ""
+                if think_piece:
+                    thinking_chars += len(think_piece)
+                if piece:
+                    parts.append(piece)
+                now = time.monotonic()
+                if now - last_log >= 30:
+                    print(
+                        f"argus-ollama: still generating… {int(now - started)}s, "
+                        f"{sum(len(p) for p in parts)} chars"
+                        + (f", thinking={thinking_chars}" if thinking_chars else ""),
+                        flush=True,
+                    )
+                    last_log = now
+                if obj.get("done"):
+                    break
+    except TimeoutError as e:
+        die(f"ollama chunk timeout ({chunk_timeout}s idle) talking to {url}: {e}")
     except urllib.error.URLError as e:
         die(f"ollama request failed ({url}): {e}")
-    msg = body.get("message") or {}
-    content = msg.get("content") or body.get("response") or ""
+
+    content = "".join(parts)
     if not content:
-        die(f"empty ollama response: {body!r}"[:500])
+        die(
+            "empty ollama response (stream produced no content"
+            + (f"; saw {thinking_chars} thinking chars — set think:false" if thinking_chars else "")
+            + ")"
+        )
+    print(
+        f"argus-ollama: model finished in {int(time.monotonic() - started)}s "
+        f"({len(content)} chars"
+        + (f", thinking={thinking_chars}" if thinking_chars else "")
+        + ")",
+        flush=True,
+    )
     return content
 
 
@@ -412,7 +475,24 @@ Description:
 """
 
     print(f"argus-ollama: host={host} model={model} pr=#{PR_NUMBER} diff_lines≈{nlines}")
-    raw_text = ollama_chat(host, model, system_full, user)
+    try:
+        raw_text = ollama_chat(host, model, system_full, user)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"argus-ollama: ollama call failed: {e}", file=sys.stderr)
+        try:
+            post_review(
+                PR_NUMBER,
+                "COMMENT",
+                "## 🛡️ Argus review\n\n"
+                f"**Verdict:** COMMENT  ·  Ollama call failed\n\n"
+                f"`{type(e).__name__}: {e}`\n\n"
+                "Check the self-hosted runner can reach Ollama and that the model is loaded.\n",
+            )
+        except Exception as post_err:
+            print(f"argus-ollama: also failed to post failure comment: {post_err}", file=sys.stderr)
+        raise SystemExit(1) from e
     raw = extract_json(raw_text)
     findings = normalize_findings(raw)
     questions = [str(q) for q in (raw.get("questions") or []) if str(q).strip()]
