@@ -39,6 +39,7 @@ jobs:
   # can use GitHub-hosted runners.
   resolve:
     if: >
+      (github.event_name == 'workflow_call') ||
       (github.event_name == 'workflow_dispatch') ||
       (github.event_name == 'pull_request' &&
         github.event.pull_request.draft == false &&
@@ -51,7 +52,10 @@ jobs:
       backend: ${{ steps.cfg.outputs.backend }}
       config_path: ${{ steps.cfg.outputs.config_path }}
     steps:
+      # Harness + config live in AccurateIC/argus, not in the app repo.
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/argus
       - id: cfg
         run: |
           CONFIG_PATH="${{ github.event_name == 'workflow_call' && inputs.config-path || 'config/argus.yml' }}"
@@ -69,7 +73,15 @@ jobs:
     needs: resolve
     runs-on: ${{ needs.resolve.outputs.backend == 'ollama' && 'self-hosted' || 'ubuntu-latest' }}
     steps:
-      - name: Checkout (full history for conflict + base-diff analysis)
+      - name: Checkout Argus harness
+        if: needs.resolve.outputs.backend == 'ollama'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/argus
+          fetch-depth: 0
+
+      - name: Checkout PR repo
+        if: needs.resolve.outputs.backend == 'claude'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -80,6 +92,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           ARGUS_CONFIG: ${{ needs.resolve.outputs.config_path }}
           GH_TOKEN: ${{ github.token }}
+          # Review the calling repo's PR, not AccurateIC/argus.
+          GH_REPO: ${{ github.repository }}
           # 27B reviews of big prompts can take >10m; stream + long overall budget.
           OLLAMA_TIMEOUT: "1800"
           OLLAMA_CHUNK_TIMEOUT: "180"
