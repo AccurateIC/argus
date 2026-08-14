@@ -28,7 +28,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: read
-  id-token: write
 
 concurrency:
   group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
