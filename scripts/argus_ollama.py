@@ -189,13 +189,14 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
     chunk_timeout = int(os.environ.get("OLLAMA_CHUNK_TIMEOUT", "120"))
     payload = {
         "model": model,
-        "stream": True,
+        "stream": False,
         "format": "json",
         # qwen3.6 streams into message.thinking by default; that burns the
         # budget with 0 content chars. Force answer tokens into content.
         "think": False,
         "options": {
             "temperature": 0.1,
+            "num_ctx": 32768,
             # Cap output so a runaway model can't sit for hours.
             "num_predict": int(os.environ.get("OLLAMA_NUM_PREDICT", "4096")),
         },
@@ -505,6 +506,9 @@ Description:
     summary = format_summary(findings, questions, memory_sugs, label)
     post_review(PR_NUMBER, event, summary)
     print(f"argus-ollama: posted {event} with {len(findings)} finding(s)")
+    # Fail the Actions check so required status checks / branch protection can block merge.
+    if event == "REQUEST_CHANGES":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
