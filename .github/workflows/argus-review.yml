@@ -96,6 +96,8 @@ jobs:
           # 27B reviews of big prompts can take >10m; stream + long overall budget.
           OLLAMA_TIMEOUT: "1800"
           OLLAMA_CHUNK_TIMEOUT: "180"
+          # qwen3.6:27b supports 262144; 32768 truncated real PRs mid-diff.
+          OLLAMA_NUM_CTX: "65536"
         run: python3 scripts/argus_ollama.py
 
       - name: Run Argus (Claude)
