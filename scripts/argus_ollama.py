@@ -322,7 +322,7 @@ def format_summary(
         counts[f["severity"]] += 1
     count_bits = " · ".join(f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit"))
     lines = [
-        "## 🛡️ Argus review",
+        "## 🛡️ Neubodhi review",
         "",
         f"**Verdict:** {verdict_label}  ·  {count_bits}",
         "",
