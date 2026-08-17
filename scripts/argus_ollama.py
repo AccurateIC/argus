@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Argus Ollama harness — one-shot PR review via a local/LAN Ollama server.
+"""Neubodhi Ollama harness — one-shot PR review via a local/LAN Ollama server.
 
 Reuses prompts/, skills/, memory/, config/argus.yml. Posts a summary review with
 `gh`. Not a full Claude Code agent (no Read/Grep tool loop).
@@ -22,10 +22,15 @@ PR_NUMBER = os.environ.get("PR_NUMBER") or os.environ.get("ARGUS_PR_NUMBER")
 SEV_RANK = {"blocker": 0, "major": 1, "minor": 2, "nit": 3}
 SEV_ICON = {"blocker": "🔴", "major": "🟠", "minor": "🟡", "nit": "⚪"}
 GATE_RANK = {"blocker": 0, "major": 1, "minor": 2}
+# Local models drift off the schema; accept the usual synonyms rather than dropping
+# the whole finding.
+FINDING_TEXT_KEYS = ("finding", "description", "message", "issue", "detail", "comment")
+NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "32768"))
+NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "4096"))
 
 
 def die(msg: str, code: int = 1) -> None:
-    print(f"argus-ollama: {msg}", file=sys.stderr)
+    print(f"neubodhi-ollama: {msg}", file=sys.stderr)
     raise SystemExit(code)
 
 
@@ -125,7 +130,7 @@ def load_skills(names: list[str]) -> str:
         if body:
             chunks.append(f"## Skill: {name}\n\n{body}")
         else:
-            print(f"argus-ollama: warning: missing skill {p}", file=sys.stderr)
+            print(f"neubodhi-ollama: warning: missing skill {p}", file=sys.stderr)
     return "\n\n---\n\n".join(chunks)
 
 
@@ -196,9 +201,9 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
         "think": False,
         "options": {
             "temperature": 0.1,
-            "num_ctx": 32768,
+            "num_ctx": NUM_CTX,
             # Cap output so a runaway model can't sit for hours.
-            "num_predict": int(os.environ.get("OLLAMA_NUM_PREDICT", "4096")),
+            "num_predict": NUM_PREDICT,
         },
         "messages": [
             {"role": "system", "content": system},
@@ -241,7 +246,7 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
                 now = time.monotonic()
                 if now - last_log >= 30:
                     print(
-                        f"argus-ollama: still generating… {int(now - started)}s, "
+                        f"neubodhi-ollama: still generating… {int(now - started)}s, "
                         f"{sum(len(p) for p in parts)} chars"
                         + (f", thinking={thinking_chars}" if thinking_chars else ""),
                         flush=True,
@@ -262,7 +267,7 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
             + ")"
         )
     print(
-        f"argus-ollama: model finished in {int(time.monotonic() - started)}s "
+        f"neubodhi-ollama: model finished in {int(time.monotonic() - started)}s "
         f"({len(content)} chars"
         + (f", thinking={thinking_chars}" if thinking_chars else "")
         + ")",
@@ -286,17 +291,24 @@ def extract_json(text: str) -> dict:
         die(f"invalid JSON from model: {e}\n{text[:800]}")
 
 
-def normalize_findings(raw: dict) -> list[dict]:
+def normalize_findings(raw: dict) -> tuple[list[dict], int]:
+    """Returns (findings, dropped). `dropped` matters: silently discarding every
+    finding and reporting "No findings" is indistinguishable from a clean PR."""
     findings = []
+    dropped = 0
     for f in raw.get("findings") or []:
         if not isinstance(f, dict):
+            dropped += 1
             continue
         sev = str(f.get("severity", "nit")).lower().strip()
         if sev not in SEV_RANK:
             sev = "nit"
         loc = str(f.get("location") or "—").strip() or "—"
-        finding = str(f.get("finding") or "").strip()
+        finding = next(
+            (str(f[k]).strip() for k in FINDING_TEXT_KEYS if str(f.get(k) or "").strip()), ""
+        )
         if not finding:
+            dropped += 1
             continue
         findings.append(
             {
@@ -308,7 +320,14 @@ def normalize_findings(raw: dict) -> list[dict]:
             }
         )
     findings.sort(key=lambda x: SEV_RANK[x["severity"]])
-    return findings
+    return findings, dropped
+
+
+def diff_char_budget(num_ctx: int, num_predict: int, overhead_chars: int) -> int:
+    """Chars of diff that still fit the model window. Ollama truncates an oversized
+    prompt silently, which reads as "no findings" — so trim on purpose instead.
+    ponytail: chars/4 token estimate; swap in a real tokenizer if it misfires."""
+    return max(0, (num_ctx - num_predict) * 4 - overhead_chars)
 
 
 def format_summary(
@@ -316,6 +335,7 @@ def format_summary(
     questions: list[str],
     memory: list[str],
     verdict_label: str,
+    warnings: list[str] | None = None,
 ) -> str:
     counts = {k: 0 for k in SEV_RANK}
     for f in findings:
@@ -328,12 +348,21 @@ def format_summary(
         "",
         "_Backend: ollama_",
         "",
+    ]
+    for w in warnings or []:
+        lines += [f"> ⚠️ {w}", ""]
+    lines += [
         "### Findings",
         "| Sev | Skill | Location | Finding |",
         "|-----|-------|----------|---------|",
     ]
     if not findings:
-        lines.append("| — | — | — | No findings. |")
+        clean = not warnings
+        lines.append(
+            "| — | — | — | No findings. |"
+            if clean
+            else "| — | — | — | **Review incomplete** — treat this as unreviewed, not clean. |"
+        )
     else:
         for f in findings:
             icon = SEV_ICON[f["severity"]]
@@ -409,17 +438,31 @@ def main() -> None:
     title = meta_j.get("title") or ""
     body = meta_j.get("body") or ""
 
-    diff = run(["gh", "pr", "diff", PR_NUMBER])
-    diff = filter_diff(diff, skip)
+    raw_diff = run(["gh", "pr", "diff", PR_NUMBER])
+    diff = filter_diff(raw_diff, skip)
     nlines = count_diff_lines(diff)
+    if not diff.strip():
+        reason = (
+            "every changed path matched a `paths.skip` glob"
+            if raw_diff.strip()
+            else "the PR diff came back empty"
+        )
+        post_review(
+            PR_NUMBER,
+            "COMMENT",
+            "## 🛡️ Neubodhi review\n\n"
+            f"**Verdict:** COMMENT  ·  nothing reviewed — {reason}.\n\n"
+            "This is **not** a clean bill of health.\n",
+        )
+        die(f"nothing to review — {reason}")
     if nlines > max_diff:
         msg = (
-            "## 🛡️ Argus review\n\n"
+            "## 🛡️ Neubodhi review\n\n"
             f"**Verdict:** COMMENT  ·  diff too large ({nlines} lines > {max_diff})\n\n"
-            "Please split this PR so Argus can review it properly.\n"
+            "Please split this PR so Neubodhi can review it properly.\n"
         )
         post_review(PR_NUMBER, "COMMENT", msg)
-        print(f"argus-ollama: skipped large diff ({nlines} lines)")
+        print(f"neubodhi-ollama: skipped large diff ({nlines} lines)")
         return
 
     system = read_text(ROOT / "prompts" / "system.md")
@@ -430,7 +473,7 @@ def main() -> None:
 
     system_full = f"""{system}
 
-You are running under the Argus Ollama harness (no interactive tools).
+You are running under the neubodhi Ollama harness (no interactive tools).
 Apply the review protocol and skills below. Respect memory.
 Return ONLY valid JSON (no markdown fences) with this schema:
 {{
@@ -449,6 +492,21 @@ Return ONLY valid JSON (no markdown fences) with this schema:
 Precision over volume. Do not re-flag accepted-patterns. Cite path:line.
 Severity gate in config is `{gate}`.
 """
+
+    warnings: list[str] = []
+    budget = diff_char_budget(
+        NUM_CTX,
+        NUM_PREDICT,
+        len(system_full) + len(protocol) + len(verdict_fmt) + len(skills_blob)
+        + len(memory_blob) + len(title) + len(body) + 512,
+    )
+    if len(diff) > budget:
+        warnings.append(
+            f"Diff is {len(diff)} chars but only ~{budget} fit the {NUM_CTX}-token context — "
+            f"it was truncated. Split this PR or raise `OLLAMA_NUM_CTX`."
+        )
+        print(f"neubodhi-ollama: truncating diff {len(diff)} -> {budget} chars", file=sys.stderr)
+        diff = diff[:budget]
 
     user = f"""# Review protocol
 {protocol}
@@ -475,37 +533,51 @@ Description:
 ```
 """
 
-    print(f"argus-ollama: host={host} model={model} pr=#{PR_NUMBER} diff_lines≈{nlines}")
+    print(f"neubodhi-ollama: host={host} model={model} pr=#{PR_NUMBER} diff_lines≈{nlines}")
     try:
         raw_text = ollama_chat(host, model, system_full, user)
     except SystemExit:
         raise
     except Exception as e:
-        print(f"argus-ollama: ollama call failed: {e}", file=sys.stderr)
+        print(f"neubodhi-ollama: ollama call failed: {e}", file=sys.stderr)
         try:
             post_review(
                 PR_NUMBER,
                 "COMMENT",
-                "## 🛡️ Argus review\n\n"
+                "## 🛡️ Neubodhi review\n\n"
                 f"**Verdict:** COMMENT  ·  Ollama call failed\n\n"
                 f"`{type(e).__name__}: {e}`\n\n"
                 "Check the self-hosted runner can reach Ollama and that the model is loaded.\n",
             )
         except Exception as post_err:
-            print(f"argus-ollama: also failed to post failure comment: {post_err}", file=sys.stderr)
+            print(f"neubodhi-ollama: also failed to post failure comment: {post_err}", file=sys.stderr)
         raise SystemExit(1) from e
     raw = extract_json(raw_text)
-    findings = normalize_findings(raw)
+    findings, dropped = normalize_findings(raw)
     questions = [str(q) for q in (raw.get("questions") or []) if str(q).strip()]
     memory_sugs = [str(m) for m in (raw.get("memory_suggestions") or []) if str(m).strip()]
+    if dropped:
+        warnings.append(f"{dropped} finding(s) from the model were unparseable and discarded.")
+        print(f"neubodhi-ollama: dropped {dropped} malformed finding(s)", file=sys.stderr)
+    if "findings" not in raw:
+        warnings.append("Model response had no `findings` key — it did not follow the schema.")
+    if not findings and not questions:
+        # A silent empty result is the failure mode that looks like success. Log the
+        # response so "no findings" can always be told apart from "model said nothing".
+        print(f"neubodhi-ollama: empty result; raw head: {raw_text[:600]!r}", file=sys.stderr)
 
     event = choose_event(findings, gate, allow_approve, author, never_approve)
     label = {"REQUEST_CHANGES": "REQUEST CHANGES", "APPROVE": "APPROVE", "COMMENT": "COMMENT"}[
         event
     ]
-    summary = format_summary(findings, questions, memory_sugs, label)
+    if warnings and event == "APPROVE":
+        event, label = "COMMENT", "COMMENT"
+    summary = format_summary(findings, questions, memory_sugs, label, warnings)
     post_review(PR_NUMBER, event, summary)
-    print(f"argus-ollama: posted {event} with {len(findings)} finding(s)")
+    print(f"neubodhi-ollama: posted {event} with {len(findings)} finding(s)")
+    # An incomplete review must not show up as a green check.
+    if warnings and not findings:
+        die("review incomplete — see warnings above")
     # Fail the Actions check so required status checks / branch protection can block merge.
     if event == "REQUEST_CHANGES":
         raise SystemExit(1)
