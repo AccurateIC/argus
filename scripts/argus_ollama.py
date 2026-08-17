@@ -25,7 +25,7 @@ GATE_RANK = {"blocker": 0, "major": 1, "minor": 2}
 # Local models drift off the schema; accept the usual synonyms rather than dropping
 # the whole finding.
 FINDING_TEXT_KEYS = ("finding", "description", "message", "issue", "detail", "comment")
-NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "32768"))
+NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "65536")) #32768
 NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "4096"))
 
 
@@ -342,7 +342,7 @@ def format_summary(
         counts[f["severity"]] += 1
     count_bits = " · ".join(f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit"))
     lines = [
-        "## 🛡️ Neubodhi review",
+        "## 🛡️ Neubodhi Review",
         "",
         f"**Verdict:** {verdict_label}  ·  {count_bits}",
         "",

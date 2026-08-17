@@ -1,4 +1,4 @@
-name: Argus Review
+name: Neubodhi  Review
 
 # Reusable + standalone PR-review workflow.
 #
@@ -45,7 +45,7 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
-        contains(github.event.comment.body, '@argus'))
+        contains(github.event.comment.body, '@neubodhi'))
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.cfg.outputs.backend }}
