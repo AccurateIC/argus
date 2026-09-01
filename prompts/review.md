@@ -5,6 +5,9 @@ Run these passes in order. Each pass is cheap; the goal is a *calibrated* review
 ## Pass 0 — Scope & context
 - `gh pr view <n>` for title/description/intent. Note what the author *claims* the
   PR does — you will check that claim in Pass 3.
+- Read **PR conversation comments** when provided. Author replies explaining intent
+  (e.g. "intentional log reduction") are authoritative unless a new functionality
+  issue appears in the diff.
 - `gh pr diff <n>` for the change. Note the changed files and group them
   (source / tests / migrations / config / generated).
 - Apply path rules from `config/argus.yml`:

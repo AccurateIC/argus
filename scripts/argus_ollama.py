@@ -149,6 +149,47 @@ def load_memory() -> str:
     return "\n\n".join(parts)
 
 
+# ponytail: substring match on login — add bot names if your org renames the app user
+_SKIP_COMMENT_AUTHORS = ("[bot]", "dependabot", "renovate")
+
+
+def load_pr_comments(pr: str, limit: int = 15, max_chars: int = 8000) -> str:
+    """Recent human PR conversation comments (issue comments on the PR thread)."""
+    repo = os.environ.get("GH_REPO") or os.environ.get("GITHUB_REPOSITORY") or ""
+    if not repo:
+        return ""
+    r = subprocess.run(
+        ["gh", "api", f"repos/{repo}/issues/{pr}/comments"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return ""
+    try:
+        items = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(items, list):
+        return ""
+
+    trigger = (os.environ.get("PR_COMMENT") or "").strip()
+    lines: list[str] = []
+    if trigger:
+        lines.append(f"- _(trigger)_: {trigger[:1500]}")
+
+    for c in items[-limit:]:
+        login = ((c.get("user") or {}).get("login") or "").lower()
+        if any(s in login for s in _SKIP_COMMENT_AUTHORS):
+            continue
+        body = (c.get("body") or "").strip()
+        if not body:
+            continue
+        lines.append(f"- **{login}**: {body[:1500]}")
+
+    blob = "\n".join(lines)
+    return blob[:max_chars]
+
+
 def count_diff_lines(diff: str) -> int:
     return sum(1 for ln in diff.splitlines() if ln.startswith("+") or ln.startswith("-"))
 
@@ -470,11 +511,14 @@ def main() -> None:
     verdict_fmt = read_text(ROOT / "prompts" / "verdict.md")
     skills_blob = load_skills(skills)
     memory_blob = load_memory()
+    comments_blob = load_pr_comments(PR_NUMBER)
 
     system_full = f"""{system}
 
 You are running under the neubodhi Ollama harness (no interactive tools).
 Apply the review protocol and skills below. Respect memory.
+If PR conversation comments explain a change is intentional, do not re-flag it unless
+there is a new concrete correctness or functionality issue.
 Return ONLY valid JSON (no markdown fences) with this schema:
 {{
   "findings": [
@@ -498,7 +542,7 @@ Severity gate in config is `{gate}`.
         NUM_CTX,
         NUM_PREDICT,
         len(system_full) + len(protocol) + len(verdict_fmt) + len(skills_blob)
-        + len(memory_blob) + len(title) + len(body) + 512,
+        + len(memory_blob) + len(comments_blob) + len(title) + len(body) + 512,
     )
     if len(diff) > budget:
         warnings.append(
@@ -526,7 +570,10 @@ Author: {author}
 
 Description:
 {body}
-
+{f'''
+# PR conversation (author feedback — treat as authoritative for intent)
+{comments_blob}
+''' if comments_blob else ''}
 # Diff
 ```diff
 {diff}

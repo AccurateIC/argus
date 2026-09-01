@@ -89,6 +89,7 @@ jobs:
         if: needs.resolve.outputs.backend == 'ollama'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR_COMMENT: ${{ github.event.comment.body }}
           ARGUS_CONFIG: ${{ needs.resolve.outputs.config_path }}
           GH_TOKEN: ${{ github.token }}
           # Review the calling repo's PR, not AccurateIC/argus.
