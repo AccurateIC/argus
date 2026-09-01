@@ -190,6 +190,69 @@ def load_pr_comments(pr: str, limit: int = 15, max_chars: int = 8000) -> str:
     return blob[:max_chars]
 
 
+_WAIVER_MARKERS = (
+    "intentional",
+    "kindly ignore",
+    "please ignore",
+    "do not flag",
+    "don't flag",
+    "ignore this",
+    "ignore the",
+)
+
+
+def extract_author_waivers(comments_blob: str) -> list[str]:
+    waivers: list[str] = []
+    for line in comments_blob.splitlines():
+        lower = line.lower()
+        if not any(m in lower for m in _WAIVER_MARKERS):
+            continue
+        text = re.sub(r"^- \*\*[^*]+\*\*: ", "", line).strip()
+        text = re.sub(r"^- _\(trigger\)_: ", "", text).strip()
+        if text:
+            waivers.append(text)
+    return waivers
+
+
+def finding_waived_by_author(finding: dict, waivers: list[str]) -> bool:
+    """True when a PR comment explicitly waived this topic."""
+    fl = finding.get("finding", "").lower()
+    loc_file = (finding.get("location") or "").split(":")[0].lower()
+    for w in waivers:
+        wl = w.lower()
+        for quoted in re.findall(r'"([^"]+)"', w):
+            if quoted.lower() in fl or quoted.lower() in finding.get("finding", ""):
+                return True
+        if loc_file and loc_file in wl:
+            return True
+        # ponytail: 3+ shared tokens of length 5+ — coarse topic match for waivers
+        w_tokens = set(re.findall(r"[a-z]{5,}", wl))
+        f_tokens = set(re.findall(r"[a-z]{5,}", fl))
+        if len(w_tokens & f_tokens) >= 3:
+            return True
+    return False
+
+
+def drop_waived_findings(
+    findings: list[dict], comments_blob: str
+) -> tuple[list[dict], list[str]]:
+    waivers = extract_author_waivers(comments_blob)
+    if not waivers:
+        return findings, []
+    kept: list[dict] = []
+    notes: list[str] = []
+    for f in findings:
+        if finding_waived_by_author(f, waivers):
+            notes.append(f"Author waived: {f.get('location', '—')}")
+            print(
+                f"neubodhi-ollama: dropped waived finding at {f.get('location')}",
+                file=sys.stderr,
+            )
+        else:
+            kept.append(f)
+    return kept, notes
+
+
 def count_diff_lines(diff: str) -> int:
     return sum(1 for ln in diff.splitlines() if ln.startswith("+") or ln.startswith("-"))
 
@@ -512,13 +575,21 @@ def main() -> None:
     skills_blob = load_skills(skills)
     memory_blob = load_memory()
     comments_blob = load_pr_comments(PR_NUMBER)
+    if comments_blob:
+        print(
+            f"neubodhi-ollama: loaded PR comments ({len(comments_blob)} chars)",
+            file=sys.stderr,
+        )
+    else:
+        print("neubodhi-ollama: no PR comments loaded", file=sys.stderr)
 
     system_full = f"""{system}
 
 You are running under the neubodhi Ollama harness (no interactive tools).
 Apply the review protocol and skills below. Respect memory.
 If PR conversation comments explain a change is intentional, do not re-flag it unless
-there is a new concrete correctness or functionality issue.
+there is a new concrete correctness or functionality issue. When the author quotes
+a specific issue and says "intentional" / "ignore", omit that finding entirely.
 Return ONLY valid JSON (no markdown fences) with this schema:
 {{
   "findings": [
@@ -601,6 +672,9 @@ Description:
         raise SystemExit(1) from e
     raw = extract_json(raw_text)
     findings, dropped = normalize_findings(raw)
+    findings, waived_notes = drop_waived_findings(findings, comments_blob)
+    if waived_notes:
+        warnings.extend(waived_notes)
     questions = [str(q) for q in (raw.get("questions") or []) if str(q).strip()]
     memory_sugs = [str(m) for m in (raw.get("memory_suggestions") or []) if str(m).strip()]
     if dropped:

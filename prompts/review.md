@@ -22,6 +22,8 @@ hunk's correctness depends on context you can't see in the diff.
 
 ## Pass 2 — Memory reconciliation
 - Drop any finding that `memory/accepted-patterns.md` marks intentional.
+- Drop any finding the PR author explicitly waived in conversation (e.g. "intentional,
+  kindly ignore", "do not flag again") for that same topic or quoted code span.
 - Re-key findings against `memory/conventions.md` (a convention violation is at
   least `minor`; a *security* convention violation is `major`+).
 - Pull relevant subsystem notes from `memory/knowledge/` if the touched area has any.
