@@ -62,7 +62,7 @@ limits:
   max_inline_comments: 15
   # Skip review entirely for PRs larger than this many changed lines and instead
   # post a note asking for the PR to be split (huge PRs get shallow reviews).
-  max_diff_lines: 4000
+  max_diff_lines: 8000
 
 # Claude model (used when backend: claude). Omit to inherit the action's default.
 model: "claude-sonnet-4-6"
@@ -71,7 +71,7 @@ model: "claude-sonnet-4-6"
 # can reach host (GitHub-hosted ubuntu-latest cannot see a LAN IP).
 ollama:
   host: "http://192.168.11.4:11434"
-  model: "qwen3.6:27b"
+  model: "qwen3.8:latest"
 
 # Add ANTHROPIC_API_KEY (or OAuth token). No skill rewrites.
 
