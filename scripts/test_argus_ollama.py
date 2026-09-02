@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from argus_ollama import (  # noqa: E402
     diff_char_budget,
+    diff_stats,
     filter_diff,
+    format_diff_too_large,
     format_summary,
     normalize_findings,
 )
@@ -43,5 +45,37 @@ assert diff_char_budget(4096, 4096, 999) == 0
 new_file_diff = "diff --git a/dist/app.js b/dist/app.js\nnew file mode 100644\n+var a = 1;\n"
 assert filter_diff(new_file_diff, ["**/dist/**"]).strip() == ""
 assert filter_diff(new_file_diff, ["**/vendor/**"]).strip() != ""
+
+sample_diff = """\
+diff --git a/new.py b/new.py
+new file mode 100644
+--- /dev/null
++++ b/new.py
+@@ -0,0 +1,2 @@
++alpha
++beta
+diff --git a/old.py b/old.py
+--- a/old.py
++++ b/old.py
+@@ -1,3 +1,2 @@
+-removed
+ kept
++added
+"""
+assert diff_stats(sample_diff) == {
+    "files": 2,
+    "additions": 3,
+    "deletions": 1,
+    "new_files": 1,
+    "total": 4,
+}
+
+too_large = format_diff_too_large(
+    {"files": 47, "additions": 3180, "deletions": 1420, "new_files": 12, "total": 4600},
+    8000,
+)
+assert "Files changed | 47" in too_large
+assert "+3,180" in too_large
+assert "Total diff lines | 4,600 (limit: 8,000)" in too_large
 
 print("ok")

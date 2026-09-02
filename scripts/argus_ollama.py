@@ -253,8 +253,42 @@ def drop_waived_findings(
     return kept, notes
 
 
-def count_diff_lines(diff: str) -> int:
-    return sum(1 for ln in diff.splitlines() if ln.startswith("+") or ln.startswith("-"))
+def diff_stats(diff: str) -> dict:
+    """Count changed lines in a unified diff (after paths.skip), excluding +++/--- headers."""
+    files = new_files = adds = dels = 0
+    for ln in diff.splitlines():
+        if ln.startswith("diff --git "):
+            files += 1
+        elif ln.startswith("new file mode"):
+            new_files += 1
+        elif ln.startswith("+++") or ln.startswith("---"):
+            continue
+        elif ln.startswith("+"):
+            adds += 1
+        elif ln.startswith("-"):
+            dels += 1
+    return {
+        "files": files,
+        "additions": adds,
+        "deletions": dels,
+        "new_files": new_files,
+        "total": adds + dels,
+    }
+
+
+def format_diff_too_large(stats: dict, max_diff: int) -> str:
+    return (
+        "## 🛡️ Neubodhi review\n\n"
+        "**Verdict:** COMMENT · diff too large\n\n"
+        "| Metric | Count |\n"
+        "|--------|------:|\n"
+        f"| Files changed | {stats['files']} |\n"
+        f"| Lines added | +{stats['additions']:,} |\n"
+        f"| Lines deleted | −{stats['deletions']:,} |\n"
+        f"| New files | {stats['new_files']} |\n"
+        f"| Total diff lines | {stats['total']:,} (limit: {max_diff:,}) |\n\n"
+        "Please split this PR so Neubodhi can review it properly.\n"
+    )
 
 
 def path_skipped(path: str, globs: list[str]) -> bool:
@@ -543,7 +577,8 @@ def main() -> None:
 
     raw_diff = run(["gh", "pr", "diff", PR_NUMBER])
     diff = filter_diff(raw_diff, skip)
-    nlines = count_diff_lines(diff)
+    stats = diff_stats(diff)
+    nlines = stats["total"]
     if not diff.strip():
         reason = (
             "every changed path matched a `paths.skip` glob"
@@ -559,13 +594,11 @@ def main() -> None:
         )
         die(f"nothing to review — {reason}")
     if nlines > max_diff:
-        msg = (
-            "## 🛡️ Neubodhi review\n\n"
-            f"**Verdict:** COMMENT  ·  diff too large ({nlines} lines > {max_diff})\n\n"
-            "Please split this PR so Neubodhi can review it properly.\n"
+        post_review(PR_NUMBER, "COMMENT", format_diff_too_large(stats, max_diff))
+        print(
+            f"neubodhi-ollama: skipped large diff "
+            f"({nlines} lines, {stats['files']} files, +{stats['additions']}/−{stats['deletions']})"
         )
-        post_review(PR_NUMBER, "COMMENT", msg)
-        print(f"neubodhi-ollama: skipped large diff ({nlines} lines)")
         return
 
     system = read_text(ROOT / "prompts" / "system.md")
