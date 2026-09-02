@@ -71,7 +71,7 @@ model: "claude-sonnet-4-6"
 # can reach host (GitHub-hosted ubuntu-latest cannot see a LAN IP).
 ollama:
   host: "http://192.168.11.4:11434"
-  model: "qwen3.8:latest"
+  model: "qwen3.6:27b"
 
 # Add ANTHROPIC_API_KEY (or OAuth token). No skill rewrites.
 

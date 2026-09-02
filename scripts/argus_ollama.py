@@ -289,16 +289,16 @@ def filter_diff(diff: str, skip: list[str]) -> str:
 
 
 def ollama_chat(host: str, model: str, system: str, user: str) -> str:
-    """Call Ollama with streaming so long generations don't hit a single read timeout."""
+    """Stream from Ollama so long prefill/generation doesn't hit a single read timeout."""
     import time
 
     url = host.rstrip("/") + "/api/chat"
-    # Overall wall clock; per-chunk socket timeout. Override via env if needed.
     overall_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "1800"))
-    chunk_timeout = int(os.environ.get("OLLAMA_CHUNK_TIMEOUT", "120"))
+    # Time-to-first-token on big diffs can exceed 3m; overall_timeout is the hard cap.
+    chunk_timeout = int(os.environ.get("OLLAMA_CHUNK_TIMEOUT", "600"))
     payload = {
         "model": model,
-        "stream": False,
+        "stream": True,
         "format": "json",
         # qwen3.6 streams into message.thinking by default; that burns the
         # budget with 0 content chars. Force answer tokens into content.
@@ -306,7 +306,6 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
         "options": {
             "temperature": 0.1,
             "num_ctx": NUM_CTX,
-            # Cap output so a runaway model can't sit for hours.
             "num_predict": NUM_PREDICT,
         },
         "messages": [
