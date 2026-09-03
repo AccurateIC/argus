@@ -15,6 +15,7 @@ from argus_ollama import (  # noqa: E402
     filter_diff,
     format_diff_too_large,
     format_summary,
+    is_github_diff_too_large,
     normalize_findings,
 )
 
@@ -77,5 +78,26 @@ too_large = format_diff_too_large(
 assert "Files changed | 47" in too_large
 assert "+3,180" in too_large
 assert "Total diff lines | 4,600 (limit: 8,000)" in too_large
+
+# GitHub API 406 path: stats from PR metadata, note about 20k cap.
+capped = format_diff_too_large(
+    {
+        "files": 120,
+        "additions": 15000,
+        "deletions": 8000,
+        "new_files": 30,
+        "total": 23000,
+        "github_capped": True,
+    },
+    8000,
+    note="GitHub could not return the full unified diff (HTTP 406 — over ~20,000 lines).",
+)
+assert "GitHub API cap" in capped
+assert "HTTP 406" in capped
+assert is_github_diff_too_large(
+    "could not find pull request diff: HTTP 406: Sorry, the diff exceeded "
+    "the maximum number of lines (20000)\nPullRequest.diff too_large"
+)
+assert not is_github_diff_too_large("HTTP 404: Not Found")
 
 print("ok")

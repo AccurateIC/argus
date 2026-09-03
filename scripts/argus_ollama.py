@@ -276,8 +276,14 @@ def diff_stats(diff: str) -> dict:
     }
 
 
-def format_diff_too_large(stats: dict, max_diff: int) -> str:
-    return (
+def format_diff_too_large(stats: dict, max_diff: int, *, note: str = "") -> str:
+    total = stats["total"]
+    limit_cell = (
+        f"{total:,}+ (GitHub API cap; Neubodhi limit: {max_diff:,})"
+        if stats.get("github_capped")
+        else f"{total:,} (limit: {max_diff:,})"
+    )
+    body = (
         "## 🛡️ Neubodhi review\n\n"
         "**Verdict:** COMMENT · diff too large\n\n"
         "| Metric | Count |\n"
@@ -286,9 +292,54 @@ def format_diff_too_large(stats: dict, max_diff: int) -> str:
         f"| Lines added | +{stats['additions']:,} |\n"
         f"| Lines deleted | −{stats['deletions']:,} |\n"
         f"| New files | {stats['new_files']} |\n"
-        f"| Total diff lines | {stats['total']:,} (limit: {max_diff:,}) |\n\n"
-        "Please split this PR so Neubodhi can review it properly.\n"
+        f"| Total diff lines | {limit_cell} |\n\n"
     )
+    if note:
+        body += f"{note}\n\n"
+    body += "Please split this PR so Neubodhi can review it properly.\n"
+    return body
+
+
+def is_github_diff_too_large(stderr: str) -> bool:
+    s = (stderr or "").lower()
+    return (
+        "http 406" in s
+        or "diff exceeded the maximum" in s
+        or "pullrequest.diff too_large" in s
+        or "too_large" in s
+    )
+
+
+def pr_stats_from_api(pr: str) -> dict:
+    """Stats when `gh pr diff` is rejected (GitHub ~20k line cap)."""
+    raw = run(
+        [
+            "gh",
+            "pr",
+            "view",
+            pr,
+            "--json",
+            "additions,deletions,changedFiles,files",
+        ]
+    )
+    data = json.loads(raw)
+    files = data.get("files") or []
+    new_files = sum(
+        1
+        for f in files
+        if str(f.get("changeType") or "").upper() in ("ADDED", "ADD", "NEW")
+    )
+    adds = int(data.get("additions") or 0)
+    dels = int(data.get("deletions") or 0)
+    nfiles = int(data.get("changedFiles") or len(files) or 0)
+    return {
+        "files": nfiles,
+        "additions": adds,
+        "deletions": dels,
+        "new_files": new_files,
+        "total": adds + dels,
+        "github_capped": True,
+    }
 
 
 def path_skipped(path: str, globs: list[str]) -> bool:
@@ -575,7 +626,45 @@ def main() -> None:
     title = meta_j.get("title") or ""
     body = meta_j.get("body") or ""
 
-    raw_diff = run(["gh", "pr", "diff", PR_NUMBER])
+    diff_r = subprocess.run(
+        ["gh", "pr", "diff", PR_NUMBER], capture_output=True, text=True
+    )
+    if diff_r.returncode != 0:
+        err = (diff_r.stderr or diff_r.stdout or "").strip()
+        if is_github_diff_too_large(err):
+            # GitHub refuses the unified diff (~20k lines). Still post the table via API stats.
+            try:
+                stats = pr_stats_from_api(PR_NUMBER)
+            except SystemExit:
+                stats = {
+                    "files": 0,
+                    "additions": 0,
+                    "deletions": 0,
+                    "new_files": 0,
+                    "total": 20000,
+                    "github_capped": True,
+                }
+            post_review(
+                PR_NUMBER,
+                "COMMENT",
+                format_diff_too_large(
+                    stats,
+                    max_diff,
+                    note=(
+                        "GitHub could not return the full unified diff "
+                        "(HTTP 406 — over ~20,000 lines)."
+                    ),
+                ),
+            )
+            print(
+                f"neubodhi-ollama: GitHub diff API too large — posted COMMENT "
+                f"({stats['files']} files, +{stats['additions']}/−{stats['deletions']})",
+                flush=True,
+            )
+            return
+        die(f"$ gh pr diff {PR_NUMBER}\n{err}")
+
+    raw_diff = diff_r.stdout
     diff = filter_diff(raw_diff, skip)
     stats = diff_stats(diff)
     nlines = stats["total"]
