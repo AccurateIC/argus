@@ -518,6 +518,13 @@ def diff_char_budget(num_ctx: int, num_predict: int, overhead_chars: int) -> int
     return max(0, (num_ctx - num_predict) * 4 - overhead_chars)
 
 
+def md_table_cell(text: str) -> str:
+    """Flatten text so GitHub Markdown tables stay one row per finding."""
+    # Newlines end a table row; pipes start new columns.
+    flat = " ".join(str(text or "").replace("\r", "\n").split())
+    return flat.replace("|", "\\|")
+
+
 def format_summary(
     findings: list[dict],
     questions: list[str],
@@ -554,11 +561,12 @@ def format_summary(
     else:
         for f in findings:
             icon = SEV_ICON[f["severity"]]
-            cell = f["finding"].replace("|", "\\|")
+            cell = md_table_cell(f["finding"])
             if f["suggested_fix"]:
-                cell += f" *Suggested:* {f['suggested_fix']}".replace("|", "\\|")
+                cell += " *Suggested:* " + md_table_cell(f["suggested_fix"])
             lines.append(
-                f"| {icon} {f['severity']} | {f['skill']} | {f['location']} | {cell} |"
+                f"| {icon} {f['severity']} | {md_table_cell(f['skill'])} "
+                f"| {md_table_cell(f['location'])} | {cell} |"
             )
     if questions:
         lines += ["", "### Questions"]

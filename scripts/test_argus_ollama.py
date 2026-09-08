@@ -16,6 +16,7 @@ from argus_ollama import (  # noqa: E402
     format_diff_too_large,
     format_summary,
     is_github_diff_too_large,
+    md_table_cell,
     normalize_findings,
 )
 
@@ -99,5 +100,23 @@ assert is_github_diff_too_large(
     "the maximum number of lines (20000)\nPullRequest.diff too_large"
 )
 assert not is_github_diff_too_large("HTTP 404: Not Found")
+
+# Newlines / pipes inside finding text must not break the Markdown table.
+assert md_table_cell("a\nb | c") == "a b \\| c"
+broken_finding = {
+    "severity": "major",
+    "skill": "correctness",
+    "location": "frontend/src/App.tsx:315",
+    "finding": "SSE parser splits on '\\n'\nand skips empty lines.",
+    "suggested_fix": "use a state\nmachine | library",
+}
+table_body = format_summary([broken_finding], [], [], "REQUEST CHANGES")
+finding_rows = [
+    ln for ln in table_body.splitlines() if ln.startswith("| 🟠") or ln.startswith("| 🟡") or ln.startswith("| ⚪") or ln.startswith("| 🔴")
+]
+assert len(finding_rows) == 1, finding_rows
+assert "\\n" in finding_rows[0] or "splits on" in finding_rows[0]
+assert "\\| library" in finding_rows[0]
+assert finding_rows[0].count("|") >= 5  # leading + 4 cols + trailing
 
 print("ok")
