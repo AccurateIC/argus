@@ -60,8 +60,11 @@ paths:
 # summary table (prevents 40-comment noise-bombs).
 limits:
   max_inline_comments: 15
-  # Skip review entirely for PRs larger than this many changed lines and instead
-  # post a note asking for the PR to be split (huge PRs get shallow reviews).
+  # Only the first N files in the unified diff are sent to the model (rest skipped
+  # with a warning). Override per run: `@neubodhi first 40 files`.
+  max_files: 20
+  # Skip review entirely for PRs larger than this many changed lines (after the
+  # file window) and instead post a note asking for the PR to be split.
   max_diff_lines: 8000
 
 # Claude model (used when backend: claude). Omit to inherit the action's default.

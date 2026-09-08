@@ -49,7 +49,11 @@ def parse_simple_yaml(text: str) -> dict:
         "gate": "major",
         "model": "claude-sonnet-4-6",
         "verdict": {"allow_approve": False, "never_approve_authors": []},
-        "limits": {"max_diff_lines": 4000, "max_inline_comments": 15},
+        "limits": {
+            "max_diff_lines": 4000,
+            "max_inline_comments": 15,
+            "max_files": 20,
+        },
         "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen3.6:27b"},
         "paths": {"skip": [], "strict": []},
     }
@@ -371,6 +375,39 @@ def filter_diff(diff: str, skip: list[str]) -> str:
         if keep:
             out.append(line)
     return "\n".join(out)
+
+
+def split_diff_by_file(diff: str) -> list[str]:
+    """Split a unified diff into one string per `diff --git` file hunk."""
+    parts: list[str] = []
+    buf: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("diff --git ") and buf:
+            parts.append("\n".join(buf))
+            buf = [line]
+        else:
+            buf.append(line)
+    if buf and any(ln.strip() for ln in buf):
+        parts.append("\n".join(buf))
+    return parts
+
+
+def take_first_n_files(diff: str, n: int) -> tuple[str, int, int]:
+    """Keep only the first n file hunks. Returns (sliced, kept, total)."""
+    parts = split_diff_by_file(diff)
+    total = len(parts)
+    if n <= 0 or total <= n:
+        return diff, total, total
+    kept = parts[:n]
+    return "\n".join(kept) + "\n", n, total
+
+
+def parse_max_files(comment: str, default: int) -> int:
+    """`@neubodhi … first 20 files …` overrides config. Caps at 200."""
+    m = re.search(r"\bfirst\s+(\d+)\s+files?\b", comment or "", re.I)
+    if not m:
+        return default
+    return max(1, min(int(m.group(1)), 200))
 
 
 def ollama_chat(host: str, model: str, system: str, user: str) -> str:
@@ -715,6 +752,8 @@ def main() -> None:
     allow_approve = bool((cfg.get("verdict") or {}).get("allow_approve"))
     never_approve = list((cfg.get("verdict") or {}).get("never_approve_authors") or [])
     max_diff = int((cfg.get("limits") or {}).get("max_diff_lines") or 4000)
+    max_files = int((cfg.get("limits") or {}).get("max_files") or 20)
+    max_files = parse_max_files(os.environ.get("PR_COMMENT") or "", max_files)
     skip = list((cfg.get("paths") or {}).get("skip") or [])
     skills = cfg.get("skills") or []
 
@@ -764,6 +803,18 @@ def main() -> None:
 
     raw_diff = diff_r.stdout
     diff = filter_diff(raw_diff, skip)
+    warnings: list[str] = []
+    diff, kept_files, total_files = take_first_n_files(diff, max_files)
+    if total_files > kept_files:
+        warnings.append(
+            f"Reviewed first {kept_files} of {total_files} files "
+            f"(limit `max_files={max_files}`). Re-run after splitting, or "
+            f"`@neubodhi first N files` with a higher N (cap 200)."
+        )
+        print(
+            f"neubodhi-ollama: limiting to first {kept_files}/{total_files} files",
+            file=sys.stderr,
+        )
     stats = diff_stats(diff)
     nlines = stats["total"]
     if not diff.strip():
@@ -781,7 +832,18 @@ def main() -> None:
         )
         die(f"nothing to review — {reason}")
     if nlines > max_diff:
-        post_review(PR_NUMBER, "COMMENT", format_diff_too_large(stats, max_diff))
+        # Stats here are for the sliced window so the table matches what we refused.
+        full_note = (
+            f"After taking the first {kept_files} files, still "
+            f"{nlines:,} changed lines (limit {max_diff:,})."
+            if total_files > kept_files
+            else ""
+        )
+        post_review(
+            PR_NUMBER,
+            "COMMENT",
+            format_diff_too_large(stats, max_diff, note=full_note),
+        )
         print(
             f"neubodhi-ollama: skipped large diff "
             f"({nlines} lines, {stats['files']} files, +{stats['additions']}/−{stats['deletions']})"
@@ -825,9 +887,9 @@ Return ONLY valid JSON (no markdown fences) with this schema:
 }}
 Precision over volume. Do not re-flag accepted-patterns. Cite path:line.
 Severity gate in config is `{gate}`.
+Only review the diff provided (it may be a partial file window).
 """
 
-    warnings: list[str] = []
     budget = diff_char_budget(
         NUM_CTX,
         NUM_PREDICT,

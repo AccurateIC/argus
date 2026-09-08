@@ -22,6 +22,8 @@ from argus_ollama import (  # noqa: E402
     is_review_payload,
     md_table_cell,
     normalize_findings,
+    parse_max_files,
+    take_first_n_files,
 )
 
 # A model that renames the text key must not be silently reduced to "no findings".
@@ -145,5 +147,19 @@ try:
     raise AssertionError("expected ValueError")
 except ValueError:
     pass
+
+# File window: first N hunks only; comment override.
+many = "".join(
+    f"diff --git a/f{i}.py b/f{i}.py\n--- a/f{i}.py\n+++ b/f{i}.py\n@@ -1 +1 @@\n-old\n+new\n"
+    for i in range(5)
+)
+sliced, kept, total = take_first_n_files(many, 2)
+assert (kept, total) == (2, 5)
+assert sliced.count("diff --git") == 2
+assert "f0.py" in sliced and "f1.py" in sliced and "f4.py" not in sliced
+assert take_first_n_files(many, 99)[1:] == (5, 5)
+assert parse_max_files("@neubodhi check only the first 20 files", 10) == 20
+assert parse_max_files("@neubodhi", 20) == 20
+assert parse_max_files("first 999 files", 20) == 200
 
 print("ok")
