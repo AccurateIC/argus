@@ -384,7 +384,8 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
     payload = {
         "model": model,
         "stream": True,
-        "format": "json",
+        # Full schema (not bare "json") — constrained decoding to the findings shape.
+        "format": FINDINGS_JSON_SCHEMA,
         # qwen3.6 streams into message.thinking by default; that burns the
         # budget with 0 content chars. Force answer tokens into content.
         "think": False,
@@ -410,7 +411,7 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
         with urllib.request.urlopen(req, timeout=chunk_timeout) as resp:
             while True:
                 if time.monotonic() - started > overall_timeout:
-                    die(
+                    raise RuntimeError(
                         f"ollama overall timeout after {overall_timeout}s "
                         f"(partial chars={sum(len(p) for p in parts)}, thinking={thinking_chars})"
                     )
@@ -443,13 +444,15 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
                 if obj.get("done"):
                     break
     except TimeoutError as e:
-        die(f"ollama chunk timeout ({chunk_timeout}s idle) talking to {url}: {e}")
+        raise RuntimeError(
+            f"ollama chunk timeout ({chunk_timeout}s idle) talking to {url}: {e}"
+        ) from e
     except urllib.error.URLError as e:
-        die(f"ollama request failed ({url}): {e}")
+        raise RuntimeError(f"ollama request failed ({url}): {e}") from e
 
     content = "".join(parts)
     if not content:
-        die(
+        raise RuntimeError(
             "empty ollama response (stream produced no content"
             + (f"; saw {thinking_chars} thinking chars — set think:false" if thinking_chars else "")
             + ")"
@@ -464,19 +467,92 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
     return content
 
 
+# Constrained-decoding schema for Ollama `format` (P1). Bare "json" only guarantees
+# some JSON object — which is how HRMS domain blobs slipped through as "reviews".
+FINDINGS_JSON_SCHEMA: dict = {
+    "type": "object",
+    "required": ["findings"],
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["severity", "skill", "location", "finding"],
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "enum": ["blocker", "major", "minor", "nit"],
+                    },
+                    "skill": {"type": "string"},
+                    "location": {"type": "string"},
+                    "finding": {"type": "string"},
+                    "suggested_fix": {"type": "string"},
+                },
+            },
+        },
+        "questions": {"type": "array", "items": {"type": "string"}},
+        "memory_suggestions": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
 def extract_json(text: str) -> dict:
+    """Parse model output to a dict. Raises ValueError (does not exit)."""
     text = text.strip()
     try:
-        return json.loads(text)
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+        raise ValueError(f"JSON root must be an object, got {type(obj).__name__}")
     except json.JSONDecodeError:
         pass
     m = re.search(r"\{[\s\S]*\}", text)
     if not m:
-        die(f"model did not return JSON:\n{text[:800]}")
+        raise ValueError(f"model did not return JSON:\n{text[:800]}")
     try:
-        return json.loads(m.group(0))
+        obj = json.loads(m.group(0))
     except json.JSONDecodeError as e:
-        die(f"invalid JSON from model: {e}\n{text[:800]}")
+        raise ValueError(f"invalid JSON from model: {e}\n{text[:800]}") from e
+    if not isinstance(obj, dict):
+        raise ValueError(f"JSON root must be an object, got {type(obj).__name__}")
+    return obj
+
+
+def is_review_payload(raw: dict) -> bool:
+    return isinstance(raw, dict) and isinstance(raw.get("findings"), list)
+
+
+def format_incomplete_review(reason: str, *, hint: str = "", preview: str = "") -> str:
+    lines = [
+        "## 🛡️ Neubodhi review",
+        "",
+        "**Verdict:** COMMENT · review incomplete",
+        "",
+        "Neubodhi could not produce a valid review for this PR.",
+        "",
+        f"**Reason:** {reason}",
+        "",
+        "This is **not** a clean bill of health.",
+    ]
+    if hint:
+        lines += ["", hint]
+    if preview:
+        lines += [
+            "",
+            "<details><summary>Model output (truncated)</summary>",
+            "",
+            "```",
+            preview[:600],
+            "```",
+            "",
+            "</details>",
+        ]
+    lines += [
+        "",
+        "Please split large PRs or reduce scope, then comment `@neubodhi` to re-run.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def normalize_findings(raw: dict) -> tuple[list[dict], int]:
@@ -605,6 +681,20 @@ def post_review(pr: str, event: str, body: str) -> None:
     }[event]
     # gh rejects empty body on some events; always pass body
     run(["gh", "pr", "review", pr, flag, "--body", body])
+
+
+def post_incomplete_and_die(pr: str, reason: str, *, hint: str = "", preview: str = "") -> None:
+    """P0: never leave the PR silent when the review harness fails to parse output."""
+    body = format_incomplete_review(reason, hint=hint, preview=preview)
+    try:
+        post_review(pr, "COMMENT", body)
+        print(f"neubodhi-ollama: posted incomplete COMMENT ({reason})", flush=True)
+    except Exception as post_err:
+        print(
+            f"neubodhi-ollama: failed to post incomplete comment: {post_err}",
+            file=sys.stderr,
+        )
+    die(f"review incomplete — {reason}")
 
 
 def main() -> None:
@@ -783,23 +873,38 @@ Description:
     print(f"neubodhi-ollama: host={host} model={model} pr=#{PR_NUMBER} diff_lines≈{nlines}")
     try:
         raw_text = ollama_chat(host, model, system_full, user)
-    except SystemExit:
-        raise
     except Exception as e:
         print(f"neubodhi-ollama: ollama call failed: {e}", file=sys.stderr)
-        try:
-            post_review(
-                PR_NUMBER,
-                "COMMENT",
-                "## 🛡️ Neubodhi review\n\n"
-                f"**Verdict:** COMMENT  ·  Ollama call failed\n\n"
-                f"`{type(e).__name__}: {e}`\n\n"
-                "Check the self-hosted runner can reach Ollama and that the model is loaded.\n",
-            )
-        except Exception as post_err:
-            print(f"neubodhi-ollama: also failed to post failure comment: {post_err}", file=sys.stderr)
-        raise SystemExit(1) from e
-    raw = extract_json(raw_text)
+        post_incomplete_and_die(
+            PR_NUMBER,
+            f"Ollama call failed: {type(e).__name__}: {e}",
+            hint="Check the self-hosted runner can reach Ollama and that the model is loaded.",
+        )
+
+    try:
+        raw = extract_json(raw_text)
+    except ValueError as e:
+        post_incomplete_and_die(
+            PR_NUMBER,
+            "model returned invalid or non-JSON output",
+            hint=(
+                "Often caused by a very large PR diff. Split the PR or reduce scope, "
+                "then re-run with `@neubodhi`."
+            ),
+            preview=str(e),
+        )
+
+    if not is_review_payload(raw):
+        post_incomplete_and_die(
+            PR_NUMBER,
+            "model JSON was not a Neubodhi review payload (missing `findings` array)",
+            hint=(
+                "The model echoed unrelated JSON from the diff instead of findings. "
+                "Split large PRs or reduce scope, then re-run with `@neubodhi`."
+            ),
+            preview=json.dumps(raw, ensure_ascii=False)[:600],
+        )
+
     findings, dropped = normalize_findings(raw)
     findings, waived_notes = drop_waived_findings(findings, comments_blob)
     if waived_notes:
@@ -809,8 +914,6 @@ Description:
     if dropped:
         warnings.append(f"{dropped} finding(s) from the model were unparseable and discarded.")
         print(f"neubodhi-ollama: dropped {dropped} malformed finding(s)", file=sys.stderr)
-    if "findings" not in raw:
-        warnings.append("Model response had no `findings` key — it did not follow the schema.")
     if not findings and not questions:
         # A silent empty result is the failure mode that looks like success. Log the
         # response so "no findings" can always be told apart from "model said nothing".

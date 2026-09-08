@@ -10,12 +10,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from argus_ollama import (  # noqa: E402
+    FINDINGS_JSON_SCHEMA,
     diff_char_budget,
     diff_stats,
+    extract_json,
     filter_diff,
     format_diff_too_large,
+    format_incomplete_review,
     format_summary,
     is_github_diff_too_large,
+    is_review_payload,
     md_table_cell,
     normalize_findings,
 )
@@ -118,5 +122,28 @@ assert len(finding_rows) == 1, finding_rows
 assert "\\n" in finding_rows[0] or "splits on" in finding_rows[0]
 assert "\\| library" in finding_rows[0]
 assert finding_rows[0].count("|") >= 5  # leading + 4 cols + trailing
+
+# P1: schema must require findings + severity enum.
+assert FINDINGS_JSON_SCHEMA["required"] == ["findings"]
+assert "blocker" in FINDINGS_JSON_SCHEMA["properties"]["findings"]["items"]["properties"]["severity"]["enum"]
+
+# P0 helpers: incomplete review message + payload detection.
+inc = format_incomplete_review(
+    "model returned invalid or non-JSON output",
+    hint="Split the PR.",
+    preview='{"key": "registration_cert"}',
+)
+assert "review incomplete" in inc
+assert "clean bill of health" in inc
+assert "registration_cert" in inc
+assert is_review_payload({"findings": []})
+assert not is_review_payload({"key": "registration_cert"})
+assert not is_review_payload({"findings": "nope"})
+assert extract_json('{"findings": []}') == {"findings": []}
+try:
+    extract_json("not json at all")
+    raise AssertionError("expected ValueError")
+except ValueError:
+    pass
 
 print("ok")
