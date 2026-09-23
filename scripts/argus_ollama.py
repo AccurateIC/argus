@@ -426,6 +426,7 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
         # qwen3.6 streams into message.thinking by default; that burns the
         # budget with 0 content chars. Force answer tokens into content.
         "think": False,
+        "stream": False,
         "options": {
             "temperature": 0.1,
             "num_ctx": NUM_CTX,
