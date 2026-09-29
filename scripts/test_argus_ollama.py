@@ -48,6 +48,9 @@ assert format_summary([], [], [], "COMMENT").count("No findings.") == 1
 assert diff_char_budget(32768, 4096, 0) == (32768 - 4096) * 4
 assert diff_char_budget(32768, 4096, 10_000) == (32768 - 4096) * 4 - 10_000
 assert diff_char_budget(4096, 4096, 999) == 0
+# 8192/4096 cannot fit the ~24k-char harness prompt; 16384/2048 can plus an 8k diff.
+assert diff_char_budget(8192, 4096, 24_000) == 0
+assert diff_char_budget(16384, 2048, 24_000) > 8000
 
 # A new file whose only changed path is skipped leaves an empty diff, not a pass.
 new_file_diff = "diff --git a/dist/app.js b/dist/app.js\nnew file mode 100644\n+var a = 1;\n"
