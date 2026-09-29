@@ -54,7 +54,7 @@ def parse_simple_yaml(text: str) -> dict:
             "max_inline_comments": 15,
             "max_files": 20,
         },
-        "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen2.5-coder:14b"},
+        "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen2.5-coder:7b"},
         "paths": {"skip": [], "strict": []},
     }
     section: str | None = None
@@ -748,7 +748,7 @@ def main() -> None:
 
     ollama = cfg.get("ollama") or {}
     host = os.environ.get("OLLAMA_HOST") or ollama.get("host") or "http://127.0.0.1:11434"
-    model = os.environ.get("OLLAMA_MODEL") or ollama.get("model") or "qwen3.6:27b"
+    model = os.environ.get("OLLAMA_MODEL") or ollama.get("model") or "qwen2.5-coder:7b"
     print(
         f"neubodhi-ollama: repo={os.environ.get('GH_REPO') or os.environ.get('GITHUB_REPOSITORY')} "
         f"actor={os.environ.get('GITHUB_ACTOR')} "
