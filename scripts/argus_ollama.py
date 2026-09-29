@@ -54,7 +54,7 @@ def parse_simple_yaml(text: str) -> dict:
             "max_inline_comments": 15,
             "max_files": 20,
         },
-        "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen3.6:27b"},
+        "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen2.5-coder:14b"},
         "paths": {"skip": [], "strict": []},
     }
     section: str | None = None
