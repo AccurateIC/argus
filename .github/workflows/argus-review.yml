@@ -70,6 +70,8 @@ jobs:
 
   review:
     needs: resolve
+    # Runner journalctl only prints this name ("Running job: …"), not step stdout.
+    name: ${{ github.repository }} #${{ github.event.pull_request.number || github.event.issue.number }} @${{ github.actor }}
     runs-on: ${{ needs.resolve.outputs.backend == 'ollama' && 'self-hosted' || 'ubuntu-latest' }}
     steps:
       - name: Checkout Argus harness

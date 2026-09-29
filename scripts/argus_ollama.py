@@ -749,6 +749,14 @@ def main() -> None:
     ollama = cfg.get("ollama") or {}
     host = os.environ.get("OLLAMA_HOST") or ollama.get("host") or "http://127.0.0.1:11434"
     model = os.environ.get("OLLAMA_MODEL") or ollama.get("model") or "qwen3.6:27b"
+    print(
+        f"neubodhi-ollama: repo={os.environ.get('GH_REPO') or os.environ.get('GITHUB_REPOSITORY')} "
+        f"actor={os.environ.get('GITHUB_ACTOR')} "
+        f"trigger={os.environ.get('GITHUB_TRIGGERING_ACTOR')} "
+        f"event={os.environ.get('GITHUB_EVENT_NAME')} "
+        f"pr=#{PR_NUMBER} model={model}",
+        flush=True,
+    )
     gate = cfg.get("gate") or "major"
     allow_approve = bool((cfg.get("verdict") or {}).get("allow_approve"))
     never_approve = list((cfg.get("verdict") or {}).get("never_approve_authors") or [])
