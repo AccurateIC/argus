@@ -26,7 +26,7 @@ GATE_RANK = {"blocker": 0, "major": 1, "minor": 2}
 # the whole finding.
 FINDING_TEXT_KEYS = ("finding", "description", "message", "issue", "detail", "comment")
 NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
-NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "2048"))
+NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "4096"))
 
 
 def die(msg: str, code: int = 1) -> None:
