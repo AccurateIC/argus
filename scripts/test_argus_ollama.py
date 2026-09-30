@@ -23,6 +23,7 @@ from argus_ollama import (  # noqa: E402
     md_table_cell,
     normalize_findings,
     parse_max_files,
+    salvage_findings_json,
     take_first_n_files,
 )
 
@@ -44,13 +45,35 @@ body = format_summary([], [], [], "COMMENT", ["model returned no usable findings
 assert "Review incomplete" in body, body
 assert format_summary([], [], [], "COMMENT").count("No findings.") == 1
 
-# Budget shrinks with overhead and never goes negative.
-assert diff_char_budget(32768, 4096, 0) == (32768 - 4096) * 4
-assert diff_char_budget(32768, 4096, 10_000) == (32768 - 4096) * 4 - 10_000
+# Budget shrinks with overhead and never goes negative (3 chars/token).
+assert diff_char_budget(32768, 4096, 0) == (32768 - 4096) * 3
+assert diff_char_budget(32768, 4096, 10_000) == (32768 - 4096) * 3 - 10_000
 assert diff_char_budget(4096, 4096, 999) == 0
-# 8192/4096 cannot fit the ~24k-char harness prompt; 16384/2048 can plus an 8k diff.
+# 8192/4096 cannot fit the ~24k-char harness prompt; 16384/4096 can plus a small diff.
 assert diff_char_budget(8192, 4096, 24_000) == 0
-assert diff_char_budget(16384, 2048, 24_000) > 8000
+assert diff_char_budget(16384, 4096, 24_000) > 0
+
+# Truncated mid-suggested_fix still yields the complete findings before it.
+_truncated = """
+{
+  "findings": [
+    {
+      "severity": "major",
+      "skill": "correctness",
+      "location": "a.ts:1",
+      "finding": "complete finding one",
+      "suggested_fix": "do the thing"
+    },
+    {
+      "severity": "minor",
+      "skill": "correctness",
+      "location": "b.ts:2",
+      "finding": "cut off mid fix",
+      "sugges
+"""
+_salvaged = salvage_findings_json(_truncated)
+assert _salvaged is not None and len(_salvaged["findings"]) == 1, _salvaged
+assert _salvaged["findings"][0]["finding"] == "complete finding one"
 
 # A new file whose only changed path is skipped leaves an empty diff, not a pass.
 new_file_diff = "diff --git a/dist/app.js b/dist/app.js\nnew file mode 100644\n+var a = 1;\n"

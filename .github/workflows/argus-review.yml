@@ -100,10 +100,10 @@ jobs:
           # 27B reviews of big prompts can take >10m; stream + long overall budget.
           OLLAMA_TIMEOUT: "1800"
           OLLAMA_CHUNK_TIMEOUT: "600"
-          # Harness prompt (9 skills + system) is ~24k chars. 8192 ctx with
-          # num_predict=4096 left 0 chars for the diff. 14B Q4 KV at 16k is ~3GB.
+          # Keep 16k ctx on the 22GB MIG. 2048 predict + chars/4 budget let the
+          # prompt steal generation room → mid-JSON cutoffs. 4096 + tighterer trim.
           OLLAMA_NUM_CTX: "16384"
-          OLLAMA_NUM_PREDICT: "2048"
+          OLLAMA_NUM_PREDICT: "4096"
         run: python3 scripts/argus_ollama.py
 
       - name: Run Argus (Claude)

@@ -410,7 +410,14 @@ def parse_max_files(comment: str, default: int) -> int:
     return max(1, min(int(m.group(1)), 200))
 
 
-def ollama_chat(host: str, model: str, system: str, user: str) -> str:
+def ollama_chat(
+    host: str,
+    model: str,
+    system: str,
+    user: str,
+    *,
+    num_predict: int | None = None,
+) -> str:
     """Stream from Ollama so long prefill/generation doesn't hit a single read timeout."""
     import time
 
@@ -418,6 +425,7 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
     overall_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "1800"))
     # Time-to-first-token on big diffs can exceed 3m; overall_timeout is the hard cap.
     chunk_timeout = int(os.environ.get("OLLAMA_CHUNK_TIMEOUT", "600"))
+    predict = NUM_PREDICT if num_predict is None else num_predict
     payload = {
         "model": model,
         "stream": True,
@@ -426,11 +434,10 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
         # qwen3.6 streams into message.thinking by default; that burns the
         # budget with 0 content chars. Force answer tokens into content.
         "think": False,
-        "stream": True,
         "options": {
             "temperature": 0.1,
             "num_ctx": NUM_CTX,
-            "num_predict": NUM_PREDICT,
+            "num_predict": predict,
         },
         "messages": [
             {"role": "system", "content": system},
@@ -443,6 +450,7 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
     )
     parts: list[str] = []
     thinking_chars = 0
+    done_reason = ""
     started = time.monotonic()
     last_log = started
     try:
@@ -480,6 +488,7 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
                     )
                     last_log = now
                 if obj.get("done"):
+                    done_reason = str(obj.get("done_reason") or "")
                     break
     except TimeoutError as e:
         raise RuntimeError(
@@ -497,7 +506,8 @@ def ollama_chat(host: str, model: str, system: str, user: str) -> str:
         )
     print(
         f"neubodhi-ollama: model finished in {int(time.monotonic() - started)}s "
-        f"({len(content)} chars"
+        f"({len(content)} chars, num_predict={predict}"
+        + (f", done_reason={done_reason}" if done_reason else "")
         + (f", thinking={thinking_chars}" if thinking_chars else "")
         + ")",
         flush=True,
@@ -554,6 +564,61 @@ def extract_json(text: str) -> dict:
     if not isinstance(obj, dict):
         raise ValueError(f"JSON root must be an object, got {type(obj).__name__}")
     return obj
+
+
+def salvage_findings_json(text: str) -> dict | None:
+    """Keep complete finding objects when the model cuts mid-JSON (num_predict/ctx)."""
+    m = re.search(r'"findings"\s*:\s*\[', text)
+    if not m:
+        return None
+    i = m.end()
+    findings: list[dict] = []
+    n = len(text)
+    while i < n:
+        while i < n and text[i] in " \t\n\r,":
+            i += 1
+        if i >= n or text[i] != "{":
+            break
+        depth = 0
+        in_str = False
+        esc = False
+        start = i
+        j = i
+        complete = False
+        while j < n:
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            obj = json.loads(text[start : j + 1])
+                        except json.JSONDecodeError:
+                            obj = None
+                        if isinstance(obj, dict) and any(
+                            str(obj.get(k) or "").strip() for k in FINDING_TEXT_KEYS
+                        ):
+                            findings.append(obj)
+                        i = j + 1
+                        complete = True
+                        break
+            j += 1
+        if not complete:
+            break
+    if not findings:
+        return None
+    return {"findings": findings, "questions": [], "memory_suggestions": []}
 
 
 def is_review_payload(raw: dict) -> bool:
@@ -628,8 +693,9 @@ def normalize_findings(raw: dict) -> tuple[list[dict], int]:
 def diff_char_budget(num_ctx: int, num_predict: int, overhead_chars: int) -> int:
     """Chars of diff that still fit the model window. Ollama truncates an oversized
     prompt silently, which reads as "no findings" — so trim on purpose instead.
-    ponytail: chars/4 token estimate; swap in a real tokenizer if it misfires."""
-    return max(0, (num_ctx - num_predict) * 4 - overhead_chars)
+    ponytail: 3 chars/token (code is denser than chars/4); under-counting ate the
+    generation budget and cut JSON mid-`suggested_fix` on gbas-web #59."""
+    return max(0, (num_ctx - num_predict) * 3 - overhead_chars)
 
 
 def md_table_cell(text: str) -> str:
@@ -952,17 +1018,57 @@ Description:
             hint="Check the self-hosted runner can reach Ollama and that the model is loaded.",
         )
 
+    raw: dict | None = None
+    parse_err: Exception | None = None
     try:
         raw = extract_json(raw_text)
     except ValueError as e:
+        parse_err = e
+        salvaged = salvage_findings_json(raw_text)
+        if salvaged:
+            print(
+                f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
+                "from truncated JSON",
+                flush=True,
+            )
+            raw = salvaged
+        else:
+            # Industry pattern: bump num_predict once when structured output truncates.
+            retry_predict = min(max(NUM_PREDICT * 2, 4096), 8192)
+            print(
+                f"neubodhi-ollama: JSON parse failed; retrying with num_predict={retry_predict}",
+                flush=True,
+            )
+            retry_user = (
+                user
+                + "\n\nRetry: return COMPLETE valid JSON only. "
+                "Max 8 findings. Keep each suggested_fix under 200 chars."
+            )
+            try:
+                raw_text = ollama_chat(
+                    host, model, system_full, retry_user, num_predict=retry_predict
+                )
+                raw = extract_json(raw_text)
+            except Exception as e2:
+                salvaged = salvage_findings_json(raw_text)
+                if salvaged:
+                    print(
+                        f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
+                        "after retry",
+                        flush=True,
+                    )
+                    raw = salvaged
+                else:
+                    parse_err = e2 if isinstance(e2, ValueError) else e
+    if raw is None:
         post_incomplete_and_die(
             PR_NUMBER,
             "model returned invalid or non-JSON output",
             hint=(
-                "Often caused by a very large PR diff. Split the PR or reduce scope, "
-                "then re-run with `@neubodhi`."
+                "Model cut off mid-JSON (generation budget / large prompt). "
+                "Re-run with `@neubodhi`, or split the PR if it keeps failing."
             ),
-            preview=str(e),
+            preview=str(parse_err or ""),
         )
 
     if not is_review_payload(raw):
