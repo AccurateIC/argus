@@ -25,8 +25,8 @@ GATE_RANK = {"blocker": 0, "major": 1, "minor": 2}
 # Local models drift off the schema; accept the usual synonyms rather than dropping
 # the whole finding.
 FINDING_TEXT_KEYS = ("finding", "description", "message", "issue", "detail", "comment")
-NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
-NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "4096"))
+NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "65536"))
+NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "8192"))
 
 
 def die(msg: str, code: int = 1) -> None:

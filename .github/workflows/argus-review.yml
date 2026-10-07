@@ -111,10 +111,9 @@ jobs:
           # 27B reviews of big prompts can take >10m; stream + long overall budget.
           OLLAMA_TIMEOUT: "1800"
           OLLAMA_CHUNK_TIMEOUT: "600"
-          # Keep 16k ctx on the 22GB MIG. 2048 predict + chars/4 budget let the
-          # prompt steal generation room → mid-JSON cutoffs. 4096 + quieter trim.
-          OLLAMA_NUM_CTX: "16384"
-          OLLAMA_NUM_PREDICT: "4096"
+          # Context window for Ollama (tokens). Override via env if needed.
+          OLLAMA_NUM_CTX: "65536"
+          OLLAMA_NUM_PREDICT: "8192"
         # Mirror step stdout/stderr into journald so `journalctl -t argus` works on
         # the self-hosted runner (runner service logs alone only show job name).
         shell: bash
