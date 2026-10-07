@@ -417,8 +417,12 @@ def ollama_chat(
     user: str,
     *,
     num_predict: int | None = None,
-) -> str:
-    """Stream from Ollama so long prefill/generation doesn't hit a single read timeout."""
+) -> tuple[str, dict]:
+    """Stream from Ollama so long prefill/generation doesn't hit a single read timeout.
+
+    Returns (content, metrics) where metrics may include input_tokens, output_tokens,
+    and duration_s from the final done chunk / client wall clock.
+    """
     import time
 
     url = host.rstrip("/") + "/api/chat"
@@ -451,6 +455,8 @@ def ollama_chat(
     parts: list[str] = []
     thinking_chars = 0
     done_reason = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     started = time.monotonic()
     last_log = started
     try:
@@ -489,6 +495,16 @@ def ollama_chat(
                     last_log = now
                 if obj.get("done"):
                     done_reason = str(obj.get("done_reason") or "")
+                    if "prompt_eval_count" in obj:
+                        try:
+                            input_tokens = int(obj["prompt_eval_count"])
+                        except (TypeError, ValueError):
+                            pass
+                    if "eval_count" in obj:
+                        try:
+                            output_tokens = int(obj["eval_count"])
+                        except (TypeError, ValueError):
+                            pass
                     break
     except TimeoutError as e:
         raise RuntimeError(
@@ -498,6 +514,12 @@ def ollama_chat(
         raise RuntimeError(f"ollama request failed ({url}): {e}") from e
 
     content = "".join(parts)
+    duration_s = int(time.monotonic() - started)
+    metrics = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration_s": duration_s,
+    }
     if not content:
         raise RuntimeError(
             "empty ollama response (stream produced no content"
@@ -505,14 +527,14 @@ def ollama_chat(
             + ")"
         )
     print(
-        f"neubodhi-ollama: model finished in {int(time.monotonic() - started)}s "
+        f"neubodhi-ollama: model finished in {duration_s}s "
         f"({len(content)} chars, num_predict={predict}"
         + (f", done_reason={done_reason}" if done_reason else "")
         + (f", thinking={thinking_chars}" if thinking_chars else "")
         + ")",
         flush=True,
     )
-    return content
+    return content, metrics
 
 
 # Constrained-decoding schema for Ollama `format` (P1). Bare "json" only guarantees
@@ -759,6 +781,66 @@ def format_summary(
     return "\n".join(lines) + "\n"
 
 
+def _fmt_token_metric(value: int | None) -> str:
+    return "unknown" if value is None else str(value)
+
+
+def format_findings_metric(findings: list[dict]) -> str:
+    """Compact findings line: Findings=4 (2 major, 2 minor) or Findings=0."""
+    if not findings:
+        return "Findings=0"
+    counts = {k: 0 for k in SEV_RANK}
+    for f in findings:
+        sev = f.get("severity")
+        if sev in counts:
+            counts[sev] += 1
+    parts = [f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit") if counts[s]]
+    return f"Findings={len(findings)} ({', '.join(parts)})"
+
+
+def print_argus_review_summary(
+    *,
+    pr: str,
+    repo: str,
+    author: str,
+    branch: str,
+    model: str,
+    num_ctx: int,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    diff_files: int | None,
+    diff_lines: int | None,
+    duration_s: int | None,
+    findings: list[dict] | None,
+    status: str,
+) -> None:
+    """One compact [ARGUS] block for Actions logs. Never raises."""
+    try:
+        inp = _fmt_token_metric(input_tokens)
+        out = _fmt_token_metric(output_tokens)
+        if input_tokens is None or output_tokens is None:
+            total_s, used_s = "unknown", "unknown"
+        else:
+            total = input_tokens + output_tokens
+            total_s = str(total)
+            used_s = f"{(total / num_ctx) * 100:.1f}%" if num_ctx > 0 else "unknown"
+        files_s = "unknown" if diff_files is None else str(diff_files)
+        lines_s = "unknown" if diff_lines is None else str(diff_lines)
+        time_s = "unknown" if duration_s is None else f"{duration_s}s"
+        findings_s = format_findings_metric(findings or [])
+        print(
+            f"[ARGUS] PR #{pr} | {repo or 'unknown'} | author={author or 'unknown'} "
+            f"| branch={branch or 'unknown'}\n"
+            f"[ARGUS] Model={model} | Context={num_ctx} | Input={inp} | Output={out} "
+            f"| Total={total_s} | Used={used_s}\n"
+            f"[ARGUS] Diff={files_s} files / {lines_s} lines | Time={time_s} | "
+            f"{findings_s} | Status={status}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"neubodhi-ollama: warning: metrics summary failed: {e}", file=sys.stderr)
+
+
 def choose_event(
     findings: list[dict],
     gate: str,
@@ -832,11 +914,17 @@ def main() -> None:
     skip = list((cfg.get("paths") or {}).get("skip") or [])
     skills = cfg.get("skills") or []
 
-    meta = run(["gh", "pr", "view", PR_NUMBER, "--json", "title,body,author"])
+    meta = run(
+        ["gh", "pr", "view", PR_NUMBER, "--json", "title,body,author,headRefName"]
+    )
     meta_j = json.loads(meta)
     author = (meta_j.get("author") or {}).get("login") or ""
+    branch = str(meta_j.get("headRefName") or "")
     title = meta_j.get("title") or ""
     body = meta_j.get("body") or ""
+    repo_name = (
+        os.environ.get("GH_REPO") or os.environ.get("GITHUB_REPOSITORY") or ""
+    )
 
     diff_r = subprocess.run(
         ["gh", "pr", "diff", PR_NUMBER], capture_output=True, text=True
@@ -872,6 +960,21 @@ def main() -> None:
                 f"neubodhi-ollama: GitHub diff API too large — posted COMMENT "
                 f"({stats['files']} files, +{stats['additions']}/−{stats['deletions']})",
                 flush=True,
+            )
+            print_argus_review_summary(
+                pr=PR_NUMBER,
+                repo=repo_name,
+                author=author,
+                branch=branch,
+                model=model,
+                num_ctx=NUM_CTX,
+                input_tokens=None,
+                output_tokens=None,
+                diff_files=stats.get("files"),
+                diff_lines=stats.get("total"),
+                duration_s=None,
+                findings=[],
+                status="skipped",
             )
             return
         die(f"$ gh pr diff {PR_NUMBER}\n{err}")
@@ -922,6 +1025,21 @@ def main() -> None:
         print(
             f"neubodhi-ollama: skipped large diff "
             f"({nlines} lines, {stats['files']} files, +{stats['additions']}/−{stats['deletions']})"
+        )
+        print_argus_review_summary(
+            pr=PR_NUMBER,
+            repo=repo_name,
+            author=author,
+            branch=branch,
+            model=model,
+            num_ctx=NUM_CTX,
+            input_tokens=None,
+            output_tokens=None,
+            diff_files=stats.get("files"),
+            diff_lines=nlines,
+            duration_s=None,
+            findings=[],
+            status="skipped",
         )
         return
 
@@ -1008,10 +1126,30 @@ Description:
 """
 
     print(f"neubodhi-ollama: host={host} model={model} pr=#{PR_NUMBER} diff_lines≈{nlines}")
+    ollama_metrics: dict = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "duration_s": None,
+    }
     try:
-        raw_text = ollama_chat(host, model, system_full, user)
+        raw_text, ollama_metrics = ollama_chat(host, model, system_full, user)
     except Exception as e:
         print(f"neubodhi-ollama: ollama call failed: {e}", file=sys.stderr)
+        print_argus_review_summary(
+            pr=PR_NUMBER,
+            repo=repo_name,
+            author=author,
+            branch=branch,
+            model=model,
+            num_ctx=NUM_CTX,
+            input_tokens=None,
+            output_tokens=None,
+            diff_files=stats.get("files"),
+            diff_lines=nlines,
+            duration_s=None,
+            findings=[],
+            status="incomplete",
+        )
         post_incomplete_and_die(
             PR_NUMBER,
             f"Ollama call failed: {type(e).__name__}: {e}",
@@ -1045,7 +1183,7 @@ Description:
                 "Max 8 findings. Keep each suggested_fix under 200 chars."
             )
             try:
-                raw_text = ollama_chat(
+                raw_text, ollama_metrics = ollama_chat(
                     host, model, system_full, retry_user, num_predict=retry_predict
                 )
                 raw = extract_json(raw_text)
@@ -1061,6 +1199,21 @@ Description:
                 else:
                     parse_err = e2 if isinstance(e2, ValueError) else e
     if raw is None:
+        print_argus_review_summary(
+            pr=PR_NUMBER,
+            repo=repo_name,
+            author=author,
+            branch=branch,
+            model=model,
+            num_ctx=NUM_CTX,
+            input_tokens=ollama_metrics.get("input_tokens"),
+            output_tokens=ollama_metrics.get("output_tokens"),
+            diff_files=stats.get("files"),
+            diff_lines=nlines,
+            duration_s=ollama_metrics.get("duration_s"),
+            findings=[],
+            status="incomplete",
+        )
         post_incomplete_and_die(
             PR_NUMBER,
             "model returned invalid or non-JSON output",
@@ -1072,6 +1225,21 @@ Description:
         )
 
     if not is_review_payload(raw):
+        print_argus_review_summary(
+            pr=PR_NUMBER,
+            repo=repo_name,
+            author=author,
+            branch=branch,
+            model=model,
+            num_ctx=NUM_CTX,
+            input_tokens=ollama_metrics.get("input_tokens"),
+            output_tokens=ollama_metrics.get("output_tokens"),
+            diff_files=stats.get("files"),
+            diff_lines=nlines,
+            duration_s=ollama_metrics.get("duration_s"),
+            findings=[],
+            status="incomplete",
+        )
         post_incomplete_and_die(
             PR_NUMBER,
             "model JSON was not a Neubodhi review payload (missing `findings` array)",
@@ -1105,6 +1273,22 @@ Description:
     summary = format_summary(findings, questions, memory_sugs, label, warnings)
     post_review(PR_NUMBER, event, summary)
     print(f"neubodhi-ollama: posted {event} with {len(findings)} finding(s)")
+    status = "incomplete" if (warnings and not findings) else "success"
+    print_argus_review_summary(
+        pr=PR_NUMBER,
+        repo=repo_name,
+        author=author,
+        branch=branch,
+        model=model,
+        num_ctx=NUM_CTX,
+        input_tokens=ollama_metrics.get("input_tokens"),
+        output_tokens=ollama_metrics.get("output_tokens"),
+        diff_files=stats.get("files"),
+        diff_lines=nlines,
+        duration_s=ollama_metrics.get("duration_s"),
+        findings=findings,
+        status=status,
+    )
     # An incomplete review must not show up as a green check.
     if warnings and not findings:
         die("review incomplete — see warnings above")

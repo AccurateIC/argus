@@ -16,6 +16,7 @@ from argus_ollama import (  # noqa: E402
     extract_json,
     filter_diff,
     format_diff_too_large,
+    format_findings_metric,
     format_incomplete_review,
     format_summary,
     is_github_diff_too_large,
@@ -23,6 +24,7 @@ from argus_ollama import (  # noqa: E402
     md_table_cell,
     normalize_findings,
     parse_max_files,
+    print_argus_review_summary,
     salvage_findings_json,
     take_first_n_files,
 )
@@ -187,5 +189,51 @@ assert take_first_n_files(many, 99)[1:] == (5, 5)
 assert parse_max_files("@neubodhi check only the first 20 files", 10) == 20
 assert parse_max_files("@neubodhi", 20) == 20
 assert parse_max_files("first 999 files", 20) == 200
+
+assert format_findings_metric([]) == "Findings=0"
+assert format_findings_metric(
+    [
+        {"severity": "major"},
+        {"severity": "major"},
+        {"severity": "minor"},
+        {"severity": "minor"},
+    ]
+) == "Findings=4 (2 major, 2 minor)"
+# Metrics printer must never raise (observability-only).
+print_argus_review_summary(
+    pr="55",
+    repo="AccurateIC/hrms",
+    author="rahul",
+    branch="feature/login",
+    model="qwen3.6:27b",
+    num_ctx=16384,
+    input_tokens=8421,
+    output_tokens=1247,
+    diff_files=6,
+    diff_lines=1842,
+    duration_s=142,
+    findings=[
+        {"severity": "major"},
+        {"severity": "major"},
+        {"severity": "minor"},
+        {"severity": "minor"},
+    ],
+    status="success",
+)
+print_argus_review_summary(
+    pr="1",
+    repo="",
+    author="",
+    branch="",
+    model="qwen3.6:27b",
+    num_ctx=16384,
+    input_tokens=None,
+    output_tokens=None,
+    diff_files=None,
+    diff_lines=None,
+    duration_s=None,
+    findings=[],
+    status="incomplete",
+)
 
 print("ok")
