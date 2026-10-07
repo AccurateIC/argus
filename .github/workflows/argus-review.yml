@@ -112,10 +112,19 @@ jobs:
           OLLAMA_TIMEOUT: "1800"
           OLLAMA_CHUNK_TIMEOUT: "600"
           # Keep 16k ctx on the 22GB MIG. 2048 predict + chars/4 budget let the
-          # prompt steal generation room → mid-JSON cutoffs. 4096 + tighterer trim.
+          # prompt steal generation room → mid-JSON cutoffs. 4096 + quieter trim.
           OLLAMA_NUM_CTX: "16384"
           OLLAMA_NUM_PREDICT: "4096"
-        run: python3 scripts/argus_ollama.py
+        # Mirror step stdout/stderr into journald so `journalctl -t argus` works on
+        # the self-hosted runner (runner service logs alone only show job name).
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/argus_ollama.py 2>&1 | while IFS= read -r line || [ -n "$line" ]; do
+            printf '%s\n' "$line"
+            logger -t argus -- "$line" || true
+          done
+          exit "${PIPESTATUS[0]}"
 
       # Claude uses an external action; AccurateIC allowlist blocks it at workflow
       # parse time even when this step is skipped. Keep a clear failure instead.

@@ -785,6 +785,19 @@ def _fmt_token_metric(value: int | None) -> str:
     return "unknown" if value is None else str(value)
 
 
+def _journal(msg: str) -> None:
+    """Best-effort write to systemd journal (journalctl -t argus). Never raises."""
+    try:
+        subprocess.run(
+            ["logger", "-t", "argus", "--", msg],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 def format_findings_metric(findings: list[dict]) -> str:
     """Compact findings line: Findings=4 (2 major, 2 minor) or Findings=0."""
     if not findings:
@@ -814,7 +827,7 @@ def print_argus_review_summary(
     findings: list[dict] | None,
     status: str,
 ) -> None:
-    """One compact [ARGUS] block for Actions logs. Never raises."""
+    """One compact [ARGUS] block for Actions + journalctl. Never raises."""
     try:
         inp = _fmt_token_metric(input_tokens)
         out = _fmt_token_metric(output_tokens)
@@ -828,15 +841,17 @@ def print_argus_review_summary(
         lines_s = "unknown" if diff_lines is None else str(diff_lines)
         time_s = "unknown" if duration_s is None else f"{duration_s}s"
         findings_s = format_findings_metric(findings or [])
-        print(
+        lines = [
             f"[ARGUS] PR #{pr} | {repo or 'unknown'} | author={author or 'unknown'} "
-            f"| branch={branch or 'unknown'}\n"
+            f"| branch={branch or 'unknown'}",
             f"[ARGUS] Model={model} | Context={num_ctx} | Input={inp} | Output={out} "
-            f"| Total={total_s} | Used={used_s}\n"
+            f"| Total={total_s} | Used={used_s}",
             f"[ARGUS] Diff={files_s} files / {lines_s} lines | Time={time_s} | "
             f"{findings_s} | Status={status}",
-            flush=True,
-        )
+        ]
+        print("\n".join(lines), flush=True)
+        for line in lines:
+            _journal(line)
     except Exception as e:
         print(f"neubodhi-ollama: warning: metrics summary failed: {e}", file=sys.stderr)
 
