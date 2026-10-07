@@ -4,7 +4,10 @@ name: Neubodhi  Review
 #
 # Backends (config/argus.yml → backend):
 #   • ollama — scripts/argus_ollama.py against a LAN/local Ollama (needs self-hosted runner)
-#   • claude — anthropics/claude-code-action (needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)
+#   • claude — currently unavailable here (org Actions allowlist blocks external actions)
+#
+# Checkout uses `git` + GITHUB_TOKEN instead of actions/checkout so this workflow
+# can run under orgs that only allow AccurateIC-owned actions.
 #
 # Verdict policy (see docs/governance.md):
 #   • request-changes  — when a finding at/above `gate` is confirmed
@@ -34,8 +37,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Read backend from config so Ollama jobs land on self-hosted (LAN) and Claude
-  # can use GitHub-hosted runners.
+  # Read backend from config so Ollama jobs land on self-hosted (LAN).
   resolve:
     if: >
       (github.event_name == 'workflow_call') ||
@@ -52,9 +54,17 @@ jobs:
       config_path: ${{ steps.cfg.outputs.config_path }}
     steps:
       # Harness + config live in AccurateIC/argus, not in the app repo.
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/argus
+      - name: Checkout Argus harness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          DEST="${GITHUB_WORKSPACE}"
+          find "$DEST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${OWNER}/argus.git" \
+            "$DEST"
       - id: cfg
         run: |
           CONFIG_PATH="${{ github.event_name == 'workflow_call' && inputs.config-path || 'config/argus.yml' }}"
@@ -77,16 +87,17 @@ jobs:
     steps:
       - name: Checkout Argus harness
         if: needs.resolve.outputs.backend == 'ollama'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/argus
-          fetch-depth: 0
-
-      - name: Checkout PR repo
-        if: needs.resolve.outputs.backend == 'claude'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          DEST="${GITHUB_WORKSPACE}"
+          find "$DEST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          # Full history not required for the Ollama harness (uses gh pr diff).
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${OWNER}/argus.git" \
+            "$DEST"
 
       - name: Run Argus (Ollama)
         if: needs.resolve.outputs.backend == 'ollama'
@@ -106,45 +117,12 @@ jobs:
           OLLAMA_NUM_PREDICT: "4096"
         run: python3 scripts/argus_ollama.py
 
+      # Claude uses an external action; AccurateIC allowlist blocks it at workflow
+      # parse time even when this step is skipped. Keep a clear failure instead.
       - name: Run Argus (Claude)
         if: needs.resolve.outputs.backend == 'claude'
-        uses: anthropics/claude-code-action@v1
-        with:
-          # Either secret works; CLAUDE_CODE_OAUTH_TOKEN takes precedence if set.
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            You are **Argus**, this repository's automated PR reviewer.
-            Review pull request #${{ github.event.pull_request.number || github.event.issue.number }}.
-
-            Follow the harness instructions exactly:
-
-            1. Read `prompts/system.md` — it defines your persona, rules, and
-               the hard line that you never approve to merely clear a gate.
-            2. Read `${{ needs.resolve.outputs.config_path }}` to learn which skills are enabled, the
-               severity gate, and path rules (skip/strict globs).
-            3. Load every enabled skill from `skills/<name>.md`. Each is a rubric.
-            4. Load repo memory: `memory/conventions.md`,
-               `memory/accepted-patterns.md`, and any relevant `memory/knowledge/*`.
-               Treat accepted-patterns as authoritative — do NOT re-flag them.
-            5. Get the diff: `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }}`.
-               Read the surrounding code (not just diff hunks) for anything you're
-               unsure about — false positives from missing context are the #1 way
-               reviewers lose trust.
-            6. For each enabled skill, apply its rubric and collect findings.
-               Dedupe across skills. Assign each finding a severity
-               (blocker | major | minor | nit) and a `file:line` citation.
-            7. Follow `prompts/verdict.md` to decide + submit the review:
-               - Post concise inline comments for real issues only.
-               - Post a summary keyed by skill, with a findings table.
-               - If any confirmed blocker/major → `gh pr review <n> --request-changes`.
-               - Else → `gh pr review <n> --comment`.
-               - Only `--approve` if `verdict.allow_approve: true` in config AND you
-                 have zero blocker/major findings AND you would genuinely sign off.
-            8. If you notice a pattern the repo keeps accepting, or a convention
-               worth recording, add a short "📝 Memory suggestion" section — a human
-               will decide whether to merge it into `memory/`.
-
-            Be concrete, cite file:line, and prefer precision over volume.
-          claude_args: >-
-            --model claude-sonnet-4-6 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
+        run: |
+          echo "Claude backend is not available: this org only allows AccurateIC-owned Actions," >&2
+          echo "so anthropics/claude-code-action cannot be used." >&2
+          echo "Set backend: ollama in AccurateIC/argus config/argus.yml (current production path)." >&2
+          exit 1
