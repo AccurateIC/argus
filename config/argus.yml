@@ -75,5 +75,14 @@ model: "claude-sonnet-4-6"
 ollama:
   host: "http://192.168.10.46:11434"
   model: "qwen3.6:27b"
+
+# Deterministic static analysis — language-specific analyzers.
+# Enabling does not change the Ollama model or num_ctx. Findings only on
+# PR-changed lines. Analyzers run only for matching file types in the PR.
+advanced_findings:
+  enabled: true
+  python:
+    ruff: true
+    ast: true
 # Add ANTHROPIC_API_KEY (or OAuth token). No skill rewrites.
 

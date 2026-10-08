@@ -14,7 +14,16 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+# Argus log timestamps only (does not change system timezone).
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _ist_stamp() -> str:
+    return datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
 ROOT = Path(os.environ.get("GITHUB_WORKSPACE") or Path(__file__).resolve().parents[1])
 CONFIG_PATH = Path(os.environ.get("ARGUS_CONFIG", ROOT / "config" / "argus.yml"))
@@ -56,9 +65,14 @@ def parse_simple_yaml(text: str) -> dict:
         },
         "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen3.6:27b"},
         "paths": {"skip": [], "strict": []},
+        "advanced_findings": {
+            "enabled": False,
+            "python": {"ruff": False, "ast": False},
+        },
     }
     section: str | None = None
     list_key: str | None = None
+    subsection: str | None = None  # nested dict under a section (e.g. advanced_findings.python)
 
     for raw in text.splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
@@ -68,12 +82,13 @@ def parse_simple_yaml(text: str) -> dict:
         if indent == 0 and line.endswith(":") and " " not in line[:-1]:
             section = line[:-1]
             list_key = None
+            subsection = None
             if section in ("skills",):
                 cfg[section] = []
                 list_key = section
                 section = None
             elif section not in cfg or not isinstance(cfg.get(section), dict):
-                if section in ("verdict", "limits", "ollama", "paths"):
+                if section in ("verdict", "limits", "ollama", "paths", "advanced_findings"):
                     cfg.setdefault(section, {})
             continue
         if indent == 0 and ":" in line:
@@ -84,6 +99,7 @@ def parse_simple_yaml(text: str) -> dict:
                     cfg[k] = v
             section = None
             list_key = None
+            subsection = None
             continue
         if list_key == "skills" and line.startswith("- "):
             cfg["skills"].append(line[2:].strip().strip('"').strip("'"))
@@ -100,10 +116,18 @@ def parse_simple_yaml(text: str) -> dict:
                 list_key = line[:-1].strip()
                 if section == "paths" and list_key in ("skip", "strict"):
                     cfg["paths"][list_key] = []
+                    subsection = None
                 elif section == "verdict" and list_key == "never_approve_authors":
                     cfg["verdict"][list_key] = []
+                    subsection = None
+                elif section == "advanced_findings":
+                    # Nested language block: python:, javascript:, …
+                    subsection = list_key
+                    cfg[section].setdefault(subsection, {})
+                    list_key = None
                 else:
                     list_key = None
+                    subsection = None
                 continue
             if ":" in line:
                 k, _, v = line.partition(":")
@@ -116,7 +140,15 @@ def parse_simple_yaml(text: str) -> dict:
                 else:
                     val = v
                 if section in cfg and isinstance(cfg[section], dict):
-                    cfg[section][k] = val
+                    if (
+                        subsection
+                        and indent >= 4
+                        and isinstance(cfg[section].get(subsection), dict)
+                    ):
+                        cfg[section][subsection][k] = val
+                    else:
+                        cfg[section][k] = val
+                        subsection = None
     return cfg
 
 
@@ -841,12 +873,13 @@ def print_argus_review_summary(
         lines_s = "unknown" if diff_lines is None else str(diff_lines)
         time_s = "unknown" if duration_s is None else f"{duration_s}s"
         findings_s = format_findings_metric(findings or [])
+        ts = _ist_stamp()
         lines = [
-            f"[ARGUS] PR #{pr} | {repo or 'unknown'} | author={author or 'unknown'} "
+            f"[ARGUS] {ts} | PR #{pr} | {repo or 'unknown'} | author={author or 'unknown'} "
             f"| branch={branch or 'unknown'}",
-            f"[ARGUS] Model={model} | Context={num_ctx} | Input={inp} | Output={out} "
+            f"[ARGUS] {ts} | Model={model} | Context={num_ctx} | Input={inp} | Output={out} "
             f"| Total={total_s} | Used={used_s}",
-            f"[ARGUS] Diff={files_s} files / {lines_s} lines | Time={time_s} | "
+            f"[ARGUS] {ts} | Diff={files_s} files / {lines_s} lines | Time={time_s} | "
             f"{findings_s} | Status={status}",
         ]
         print("\n".join(lines), flush=True)
@@ -928,6 +961,8 @@ def main() -> None:
     max_files = parse_max_files(os.environ.get("PR_COMMENT") or "", max_files)
     skip = list((cfg.get("paths") or {}).get("skip") or [])
     skills = cfg.get("skills") or []
+    adv_cfg = cfg.get("advanced_findings") or {}
+    adv_enabled = bool(adv_cfg.get("enabled"))
 
     meta = run(
         ["gh", "pr", "view", PR_NUMBER, "--json", "title,body,author,headRefName"]
@@ -1112,6 +1147,35 @@ Only review the diff provided (it may be a partial file window).
         print(f"neubodhi-ollama: truncating diff {len(diff)} -> {budget} chars", file=sys.stderr)
         diff = diff[:budget]
 
+    det_findings: list[dict] = []
+    loop_hint_lines: list[str] = []
+    if adv_enabled:
+        try:
+            _scripts_dir = Path(__file__).resolve().parent
+            if str(_scripts_dir) not in sys.path:
+                sys.path.insert(0, str(_scripts_dir))
+            from advanced_findings import run_advanced_findings  # noqa: E402
+
+            det_findings, loop_hint_lines, _adv_note = run_advanced_findings(
+                diff,
+                PR_NUMBER,
+                adv_cfg=adv_cfg,
+            )
+        except Exception as adv_err:
+            print(
+                f"neubodhi-ollama: advanced_findings failed (continuing): {adv_err}",
+                file=sys.stderr,
+            )
+            det_findings, loop_hint_lines = [], []
+
+    hints_section = ""
+    if loop_hint_lines:
+        hints_section = (
+            "\n# Advanced analysis hints (confirm or dismiss — do not rubber-stamp)\n"
+            + "\n".join(loop_hint_lines)
+            + "\n"
+        )
+
     user = f"""# Review protocol
 {protocol}
 
@@ -1133,7 +1197,7 @@ Description:
 {f'''
 # PR conversation (author feedback — treat as authoritative for intent)
 {comments_blob}
-''' if comments_blob else ''}
+''' if comments_blob else ''}{hints_section}
 # Diff
 ```diff
 {diff}
@@ -1266,6 +1330,30 @@ Description:
         )
 
     findings, dropped = normalize_findings(raw)
+    if det_findings:
+        try:
+            _scripts_dir = Path(__file__).resolve().parent
+            if str(_scripts_dir) not in sys.path:
+                sys.path.insert(0, str(_scripts_dir))
+            from advanced_findings import merge_findings  # noqa: E402
+
+            findings = merge_findings(det_findings, findings)
+        except Exception as merge_err:
+            print(
+                f"neubodhi-ollama: advanced_findings merge failed: {merge_err}",
+                file=sys.stderr,
+            )
+            # Fall back to concatenating public fields only
+            for f in det_findings:
+                findings.append(
+                    {
+                        "severity": f.get("severity") or "nit",
+                        "skill": f.get("skill") or "correctness",
+                        "location": f.get("location") or "—",
+                        "finding": f.get("finding") or "",
+                        "suggested_fix": f.get("suggested_fix") or "",
+                    }
+                )
     findings, waived_notes = drop_waived_findings(findings, comments_blob)
     if waived_notes:
         warnings.extend(waived_notes)
