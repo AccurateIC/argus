@@ -59,9 +59,10 @@ def parse_simple_yaml(text: str) -> dict:
         "model": "claude-sonnet-4-6",
         "verdict": {"allow_approve": False, "never_approve_authors": []},
         "limits": {
-            "max_diff_lines": 4000,
+            "max_diff_lines": 8000,
             "max_inline_comments": 15,
-            "max_files": 20,
+            # 0 = review every file via sequential context-sized batches.
+            "max_files": 0,
         },
         "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen3.6:27b"},
         "paths": {"skip": [], "strict": []},
@@ -425,7 +426,10 @@ def split_diff_by_file(diff: str) -> list[str]:
 
 
 def take_first_n_files(diff: str, n: int) -> tuple[str, int, int]:
-    """Keep only the first n file hunks. Returns (sliced, kept, total)."""
+    """Keep only the first n file hunks. Returns (sliced, kept, total).
+
+    ``n <= 0`` means unlimited (keep every file hunk).
+    """
     parts = split_diff_by_file(diff)
     total = len(parts)
     if n <= 0 or total <= n:
@@ -434,12 +438,276 @@ def take_first_n_files(diff: str, n: int) -> tuple[str, int, int]:
     return "\n".join(kept) + "\n", n, total
 
 
+def path_from_file_diff(file_diff: str) -> str:
+    """Best-effort path from a `diff --git` hunk (prefers b/ path)."""
+    for line in file_diff.splitlines():
+        if line.startswith("diff --git "):
+            m = re.search(r" b/(.+)$", line)
+            if m:
+                return m.group(1).strip()
+            parts = line.split()
+            if len(parts) >= 4:
+                return parts[3].removeprefix("b/").strip()
+        if line.startswith("+++ b/"):
+            return line[6:].strip()
+    return ""
+
+
+def split_file_diff_by_hunk(
+    file_diff: str,
+    *,
+    char_budget: int,
+    max_lines: int | None,
+) -> list[tuple[str, bool]]:
+    """Split one file's unified diff into context-fitting pieces.
+
+    Returns list of ``(chunk, truncated)``. ``truncated=True`` only when a single
+    ``@@`` hunk still exceeds the budget (cannot review without chopping).
+    """
+    budget = max(1, char_budget)
+    line_cap = max_lines if (max_lines is not None and max_lines > 0) else None
+    lines = file_diff.splitlines()
+    header: list[str] = []
+    hunks: list[list[str]] = []
+    cur: list[str] | None = None
+    for line in lines:
+        if line.startswith("@@"):
+            if cur is not None:
+                hunks.append(cur)
+            cur = [line]
+        elif cur is not None:
+            cur.append(line)
+        else:
+            header.append(line)
+    if cur is not None:
+        hunks.append(cur)
+    if not hunks:
+        body = file_diff if file_diff.endswith("\n") else file_diff + "\n"
+        if len(body) <= budget and (
+            line_cap is None or int(diff_stats(body).get("total") or 0) <= line_cap
+        ):
+            return [(body, False)]
+        return [(body[:budget], True)]
+
+    header_text = "\n".join(header) + ("\n" if header else "")
+    header_len = len(header_text)
+    out: list[tuple[str, bool]] = []
+    pack: list[str] = []
+    pack_chars = header_len
+    pack_lines = 0
+
+    def flush_pack() -> None:
+        nonlocal pack, pack_chars, pack_lines
+        if not pack:
+            return
+        chunk = header_text + "\n".join(pack)
+        if not chunk.endswith("\n"):
+            chunk += "\n"
+        out.append((chunk, False))
+        pack = []
+        pack_chars = header_len
+        pack_lines = 0
+
+    for hk in hunks:
+        piece = "\n".join(hk)
+        p_chars = len(piece) + 1
+        p_lines = int(diff_stats(piece).get("total") or 0)
+        alone = header_len + p_chars > budget or (
+            line_cap is not None and p_lines > line_cap
+        )
+        if alone:
+            flush_pack()
+            raw = header_text + piece
+            if not raw.endswith("\n"):
+                raw += "\n"
+            # truncated=True only when we actually chop bytes. Soft line_cap
+            # overflow that still fits char budget is sent whole as its own pass.
+            if len(raw) > budget:
+                out.append((raw[:budget], True))
+            else:
+                out.append((raw, False))
+            continue
+        if pack and (
+            pack_chars + p_chars > budget
+            or (line_cap is not None and pack_lines + p_lines > line_cap)
+        ):
+            flush_pack()
+        pack.append(piece)
+        pack_chars += p_chars
+        pack_lines += p_lines
+    flush_pack()
+    return out
+
+
+def pack_file_batches(
+    file_hunks: list[str],
+    *,
+    char_budget: int,
+    max_lines: int | None,
+) -> list[str]:
+    """Pack whole files into sequential batches that fit the model window.
+
+    Never splits one file across two batches. Backward-compatible: returns
+    joined diff strings only.
+    """
+    return [
+        b["diff"]
+        for b in build_review_batches(
+            file_hunks, char_budget=char_budget, max_lines=max_lines
+        )
+    ]
+
+
+def build_review_batches(
+    file_hunks: list[str],
+    *,
+    char_budget: int,
+    max_lines: int | None,
+) -> list[dict]:
+    """Pack **whole files** into context-sized review passes.
+
+    Each batch dict: ``diff``, ``paths``, ``truncated``.
+
+    Rules:
+    - Fill pass N with as many complete files as fit the char/line budget.
+    - If the next file does not fit the leftover space, it goes entirely into
+      pass N+1 (never half in N and half in N+1).
+    - If one file alone exceeds the full budget, it gets its own pass and may
+      be truncated (``truncated=True``) so the model still sees a prefix.
+    """
+    if not file_hunks:
+        return []
+    budget = max(1, char_budget)
+    line_cap = max_lines if (max_lines is not None and max_lines > 0) else None
+
+    batches: list[dict] = []
+    cur_diffs: list[str] = []
+    cur_paths: list[str] = []
+    cur_chars = 0
+    cur_lines = 0
+
+    def flush() -> None:
+        nonlocal cur_diffs, cur_paths, cur_chars, cur_lines
+        if not cur_diffs:
+            return
+        joined = "".join(cur_diffs)
+        if not joined.endswith("\n"):
+            joined += "\n"
+        batches.append(
+            {"diff": joined, "paths": list(cur_paths), "truncated": False}
+        )
+        cur_diffs, cur_paths, cur_chars, cur_lines = [], [], 0, 0
+
+    for file_diff in file_hunks:
+        path = path_from_file_diff(file_diff) or "(unknown)"
+        body = file_diff if file_diff.endswith("\n") else file_diff + "\n"
+        b_chars = len(body)
+        b_lines = int(diff_stats(body).get("total") or 0)
+        alone_too_big = b_chars > budget or (
+            line_cap is not None and b_lines > line_cap
+        )
+
+        if alone_too_big:
+            # Whole file cannot fit one pass → own pass (truncate chars only if needed).
+            flush()
+            if b_chars > budget:
+                batches.append(
+                    {
+                        "diff": body[:budget],
+                        "paths": [path],
+                        "truncated": True,
+                    }
+                )
+            else:
+                # Over soft line_cap but under char budget: still one whole-file pass.
+                batches.append(
+                    {"diff": body, "paths": [path], "truncated": False}
+                )
+            continue
+
+        would_exceed = cur_diffs and (
+            cur_chars + b_chars > budget
+            or (line_cap is not None and cur_lines + b_lines > line_cap)
+        )
+        if would_exceed:
+            flush()
+        cur_diffs.append(body)
+        cur_paths.append(path)
+        cur_chars += b_chars
+        cur_lines += b_lines
+    flush()
+    return batches
+
+
+def dedupe_findings(findings: list[dict]) -> list[dict]:
+    """Drop duplicate findings across multi-pass batches (same loc+text)."""
+    seen: set[tuple[str, str, str]] = set()
+    out: list[dict] = []
+    for f in findings:
+        key = (
+            str(f.get("severity") or ""),
+            str(f.get("location") or ""),
+            str(f.get("finding") or "")[:160],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
+def format_coverage_section(
+    *,
+    total_files: int,
+    intended_paths: list[str],
+    covered_paths: set[str],
+    batch_count: int,
+    batch_ok: int,
+    truncated_paths: list[str],
+    failed_batches: list[str],
+) -> str:
+    """Markdown proof of what the multi-pass review actually covered."""
+    covered = len(covered_paths)
+    intended = len(intended_paths)
+    missing = [p for p in intended_paths if p not in covered_paths]
+    complete = (
+        not missing
+        and not truncated_paths
+        and not failed_batches
+        and batch_ok == batch_count
+        and batch_count > 0
+    )
+    lines = [
+        "### Coverage (multi-pass)",
+        f"- Files in scope: **{intended}/{total_files}**"
+        + (" (file cap applied)" if intended < total_files else ""),
+        f"- Files covered by successful batches: **{covered}/{intended}**",
+        f"- Batches: **{batch_ok}/{batch_count}** succeeded",
+        f"- Coverage complete: **{'yes' if complete else 'NO'}**",
+    ]
+    if truncated_paths:
+        sample = ", ".join(f"`{p}`" for p in truncated_paths[:8])
+        extra = f" (+{len(truncated_paths) - 8} more)" if len(truncated_paths) > 8 else ""
+        lines.append(f"- Truncated (context overflow): {sample}{extra}")
+    if missing:
+        sample = ", ".join(f"`{p}`" for p in missing[:8])
+        extra = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
+        lines.append(f"- Missing coverage: {sample}{extra}")
+    if failed_batches:
+        lines.append(f"- Failed batches: {len(failed_batches)}")
+    return "\n".join(lines) + "\n"
+
+
 def parse_max_files(comment: str, default: int) -> int:
-    """`@neubodhi … first 20 files …` overrides config. Caps at 200."""
+    """`@neubodhi … first 20 files …` overrides config.
+
+    Caps at 500. Returns ``default`` unchanged when the phrase is absent
+    (``0`` means unlimited / review all files).
+    """
     m = re.search(r"\bfirst\s+(\d+)\s+files?\b", comment or "", re.I)
     if not m:
         return default
-    return max(1, min(int(m.group(1)), 200))
+    return max(1, min(int(m.group(1)), 500))
 
 
 def ollama_chat(
@@ -759,49 +1027,113 @@ def md_table_cell(text: str) -> str:
     return flat.replace("|", "\\|")
 
 
+def _findings_table_lines(findings: list[dict], *, empty_clean: bool) -> list[str]:
+    lines = [
+        "| Sev | Skill | Location | Finding |",
+        "|-----|-------|----------|---------|",
+    ]
+    if not findings:
+        lines.append(
+            "| — | — | — | No findings. |"
+            if empty_clean
+            else "| — | — | — | **Pass failed / incomplete** — treat as unreviewed. |"
+        )
+        return lines
+    for f in findings:
+        icon = SEV_ICON[f["severity"]]
+        cell = md_table_cell(f["finding"])
+        if f["suggested_fix"]:
+            cell += " *Suggested:* " + md_table_cell(f["suggested_fix"])
+        lines.append(
+            f"| {icon} {f['severity']} | {md_table_cell(f['skill'])} "
+            f"| {md_table_cell(f['location'])} | {cell} |"
+        )
+    return lines
+
+
+def format_pass_summary(
+    *,
+    pass_i: int,
+    pass_n: int,
+    paths: list[str],
+    findings: list[dict],
+    questions: list[str],
+    warnings: list[str] | None = None,
+    failed: bool = False,
+    error: str = "",
+) -> str:
+    """GitHub body for one automatic review pass (posted when that pass finishes)."""
+    counts = {k: 0 for k in SEV_RANK}
+    for f in findings:
+        counts[f["severity"]] += 1
+    count_bits = " · ".join(
+        f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit") if counts[s]
+    ) or "0 findings"
+    status = "FAILED" if failed else "done"
+    path_list = ", ".join(f"`{p}`" for p in paths[:20])
+    if len(paths) > 20:
+        path_list += f" … (+{len(paths) - 20} more)"
+    lines = [
+        f"## 🛡️ Neubodhi Review — Pass {pass_i} of {pass_n}",
+        "",
+        f"**Status:** {status}  ·  {count_bits}  ·  {len(paths)} file(s)",
+        "",
+        f"**Files in this pass:** {path_list or '(unknown)'}",
+        "",
+        "_Automatic multi-pass: next passes (if any) post separately when ready._",
+        "",
+    ]
+    for w in warnings or []:
+        lines += [f"> ⚠️ {w}", ""]
+    if failed and error:
+        lines += [f"> ❌ {error}", ""]
+    lines += ["### Findings"] + _findings_table_lines(
+        findings, empty_clean=not failed and not (warnings or [])
+    )
+    if questions:
+        lines += ["", "### Questions"]
+        for q in questions:
+            lines.append(f"- {q}")
+    return "\n".join(lines) + "\n"
+
+
 def format_summary(
     findings: list[dict],
     questions: list[str],
     memory: list[str],
     verdict_label: str,
     warnings: list[str] | None = None,
+    *,
+    coverage_md: str = "",
+    incomplete: bool = False,
+    pass_count: int = 0,
 ) -> str:
     counts = {k: 0 for k in SEV_RANK}
     for f in findings:
         counts[f["severity"]] += 1
     count_bits = " · ".join(f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit"))
     lines = [
-        "## 🛡️ Neubodhi Review",
+        "## 🛡️ Neubodhi Review — Final summary",
         "",
         f"**Verdict:** {verdict_label}  ·  {count_bits}",
         "",
         "_Backend: ollama_",
         "",
     ]
+    if pass_count > 1:
+        lines += [
+            f"_Detailed findings were posted per pass ({pass_count} automatic reviews above). "
+            "This comment is the overall verdict + coverage._",
+            "",
+        ]
     for w in warnings or []:
         lines += [f"> ⚠️ {w}", ""]
-    lines += [
-        "### Findings",
-        "| Sev | Skill | Location | Finding |",
-        "|-----|-------|----------|---------|",
-    ]
-    if not findings:
-        clean = not warnings
-        lines.append(
-            "| — | — | — | No findings. |"
-            if clean
-            else "| — | — | — | **Review incomplete** — treat this as unreviewed, not clean. |"
-        )
-    else:
-        for f in findings:
-            icon = SEV_ICON[f["severity"]]
-            cell = md_table_cell(f["finding"])
-            if f["suggested_fix"]:
-                cell += " *Suggested:* " + md_table_cell(f["suggested_fix"])
-            lines.append(
-                f"| {icon} {f['severity']} | {md_table_cell(f['skill'])} "
-                f"| {md_table_cell(f['location'])} | {cell} |"
-            )
+    if coverage_md:
+        lines += [coverage_md.rstrip(), ""]
+    # Keep a combined table so the gate/verdict is self-contained.
+    lines += ["### All findings (combined)"] + _findings_table_lines(
+        findings, empty_clean=not warnings and not incomplete
+    )
     if questions:
         lines += ["", "### Questions"]
         for q in questions:
@@ -931,6 +1263,99 @@ def post_incomplete_and_die(pr: str, reason: str, *, hint: str = "", preview: st
     die(f"review incomplete — {reason}")
 
 
+def review_diff_with_ollama(
+    host: str,
+    model: str,
+    system_full: str,
+    user: str,
+) -> tuple[list[dict], list[str], list[str], dict, int, str | None]:
+    """One Ollama review call + JSON extract/normalize.
+
+    Returns (findings, questions, memory_suggestions, metrics, dropped, error).
+    ``error`` is None on success.
+    """
+    empty_metrics: dict = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "duration_s": None,
+    }
+    try:
+        raw_text, metrics = ollama_chat(host, model, system_full, user)
+    except Exception as e:
+        return [], [], [], empty_metrics, 0, f"Ollama call failed: {type(e).__name__}: {e}"
+
+    raw: dict | None = None
+    parse_err: Exception | None = None
+    try:
+        raw = extract_json(raw_text)
+    except ValueError as e:
+        parse_err = e
+        salvaged = salvage_findings_json(raw_text)
+        if salvaged:
+            print(
+                f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
+                "from truncated JSON",
+                flush=True,
+            )
+            raw = salvaged
+        else:
+            retry_predict = min(max(NUM_PREDICT * 2, 4096), 8192)
+            print(
+                f"neubodhi-ollama: JSON parse failed; retrying with num_predict={retry_predict}",
+                flush=True,
+            )
+            retry_user = (
+                user
+                + "\n\nRetry: return COMPLETE valid JSON only. "
+                "Max 8 findings. Keep each suggested_fix under 200 chars."
+            )
+            try:
+                raw_text, metrics = ollama_chat(
+                    host, model, system_full, retry_user, num_predict=retry_predict
+                )
+                raw = extract_json(raw_text)
+            except Exception as e2:
+                salvaged = salvage_findings_json(raw_text)
+                if salvaged:
+                    print(
+                        f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
+                        "after retry",
+                        flush=True,
+                    )
+                    raw = salvaged
+                else:
+                    parse_err = e2 if isinstance(e2, ValueError) else e
+
+    if raw is None:
+        return (
+            [],
+            [],
+            [],
+            metrics,
+            0,
+            f"model returned invalid or non-JSON output ({parse_err})",
+        )
+    if not is_review_payload(raw):
+        return (
+            [],
+            [],
+            [],
+            metrics,
+            0,
+            "model JSON was not a Neubodhi review payload (missing `findings` array)",
+        )
+
+    findings, dropped = normalize_findings(raw)
+    questions = [str(q) for q in (raw.get("questions") or []) if str(q).strip()]
+    memory_sugs = [str(m) for m in (raw.get("memory_suggestions") or []) if str(m).strip()]
+    if not findings and not questions:
+        print(
+            f"neubodhi-ollama: empty result; raw head: {raw_text[:600]!r}",
+            file=sys.stderr,
+        )
+    return findings, questions, memory_sugs, metrics, dropped, None
+
+
 def main() -> None:
     if not PR_NUMBER:
         die("PR_NUMBER (or ARGUS_PR_NUMBER) is required")
@@ -956,8 +1381,10 @@ def main() -> None:
     gate = cfg.get("gate") or "major"
     allow_approve = bool((cfg.get("verdict") or {}).get("allow_approve"))
     never_approve = list((cfg.get("verdict") or {}).get("never_approve_authors") or [])
-    max_diff = int((cfg.get("limits") or {}).get("max_diff_lines") or 4000)
-    max_files = int((cfg.get("limits") or {}).get("max_files") or 20)
+    # Soft per-batch line budget when packing files (not a whole-PR skip).
+    max_diff = int((cfg.get("limits") or {}).get("max_diff_lines") or 8000)
+    # 0 = unlimited (review all files sequentially). Comment can still cap.
+    max_files = int((cfg.get("limits") or {}).get("max_files") or 0)
     max_files = parse_max_files(os.environ.get("PR_COMMENT") or "", max_files)
     skip = list((cfg.get("paths") or {}).get("skip") or [])
     skills = cfg.get("skills") or []
@@ -1035,9 +1462,9 @@ def main() -> None:
     diff, kept_files, total_files = take_first_n_files(diff, max_files)
     if total_files > kept_files:
         warnings.append(
-            f"Reviewed first {kept_files} of {total_files} files "
-            f"(limit `max_files={max_files}`). Re-run after splitting, or "
-            f"`@neubodhi first N files` with a higher N (cap 200)."
+            f"Considering first {kept_files} of {total_files} files "
+            f"(limit `max_files={max_files}`). Use `@neubodhi first N files` or set "
+            f"`limits.max_files: 0` to review all."
         )
         print(
             f"neubodhi-ollama: limiting to first {kept_files}/{total_files} files",
@@ -1059,39 +1486,6 @@ def main() -> None:
             "This is **not** a clean bill of health.\n",
         )
         die(f"nothing to review — {reason}")
-    if nlines > max_diff:
-        # Stats here are for the sliced window so the table matches what we refused.
-        full_note = (
-            f"After taking the first {kept_files} files, still "
-            f"{nlines:,} changed lines (limit {max_diff:,})."
-            if total_files > kept_files
-            else ""
-        )
-        post_review(
-            PR_NUMBER,
-            "COMMENT",
-            format_diff_too_large(stats, max_diff, note=full_note),
-        )
-        print(
-            f"neubodhi-ollama: skipped large diff "
-            f"({nlines} lines, {stats['files']} files, +{stats['additions']}/−{stats['deletions']})"
-        )
-        print_argus_review_summary(
-            pr=PR_NUMBER,
-            repo=repo_name,
-            author=author,
-            branch=branch,
-            model=model,
-            num_ctx=NUM_CTX,
-            input_tokens=None,
-            output_tokens=None,
-            diff_files=stats.get("files"),
-            diff_lines=nlines,
-            duration_s=None,
-            findings=[],
-            status="skipped",
-        )
-        return
 
     system = read_text(ROOT / "prompts" / "system.md")
     protocol = read_text(ROOT / "prompts" / "review.md")
@@ -1130,22 +1524,43 @@ Return ONLY valid JSON (no markdown fences) with this schema:
 }}
 Precision over volume. Do not re-flag accepted-patterns. Cite path:line.
 Severity gate in config is `{gate}`.
-Only review the diff provided (it may be a partial file window).
+Only review the diff provided (it may be one batch of a multi-batch PR review).
 """
 
-    budget = diff_char_budget(
-        NUM_CTX,
-        NUM_PREDICT,
-        len(system_full) + len(protocol) + len(verdict_fmt) + len(skills_blob)
-        + len(memory_blob) + len(comments_blob) + len(title) + len(body) + 512,
+    overhead = (
+        len(system_full)
+        + len(protocol)
+        + len(verdict_fmt)
+        + len(skills_blob)
+        + len(memory_blob)
+        + len(comments_blob)
+        + len(title)
+        + len(body)
+        + 1024
     )
-    if len(diff) > budget:
-        warnings.append(
-            f"Diff is {len(diff)} chars but only ~{budget} fit the {NUM_CTX}-token context — "
-            f"it was truncated. Split this PR or raise `OLLAMA_NUM_CTX`."
-        )
-        print(f"neubodhi-ollama: truncating diff {len(diff)} -> {budget} chars", file=sys.stderr)
-        diff = diff[:budget]
+    budget = diff_char_budget(NUM_CTX, NUM_PREDICT, overhead)
+    file_hunks = split_diff_by_file(diff)
+    intended_paths = [path_from_file_diff(h) or f"(file-{i})" for i, h in enumerate(file_hunks)]
+    batches = build_review_batches(
+        file_hunks,
+        char_budget=budget,
+        max_lines=max_diff,
+    )
+    if not batches and diff.strip():
+        batches = [
+            {
+                "diff": diff if diff.endswith("\n") else diff + "\n",
+                "paths": intended_paths,
+                "truncated": False,
+            }
+        ]
+
+    print(
+        f"neubodhi-ollama: host={host} model={model} pr=#{PR_NUMBER} "
+        f"files={kept_files}/{total_files} lines≈{nlines} batches={len(batches)} "
+        f"budget_chars≈{budget}",
+        flush=True,
+    )
 
     det_findings: list[dict] = []
     loop_hint_lines: list[str] = []
@@ -1156,6 +1571,7 @@ Only review the diff provided (it may be a partial file window).
                 sys.path.insert(0, str(_scripts_dir))
             from advanced_findings import run_advanced_findings  # noqa: E402
 
+            # Deterministic analyzers see the full (non-truncated) file set once.
             det_findings, loop_hint_lines, _adv_note = run_advanced_findings(
                 diff,
                 PR_NUMBER,
@@ -1168,6 +1584,22 @@ Only review the diff provided (it may be a partial file window).
             )
             det_findings, loop_hint_lines = [], []
 
+    findings: list[dict] = []
+    questions: list[str] = []
+    memory_sugs: list[str] = []
+    dropped = 0
+    ollama_metrics: dict = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "duration_s": 0,
+    }
+    batch_errors: list[str] = []
+    path_successes: set[str] = set()
+    path_failures: set[str] = set()
+    truncated_paths: list[str] = []
+    batch_ok = 0
+    max_batch_retries = int(os.environ.get("ARGUS_BATCH_RETRIES", "1"))
+
     hints_section = ""
     if loop_hint_lines:
         hints_section = (
@@ -1176,7 +1608,34 @@ Only review the diff provided (it may be a partial file window).
             + "\n"
         )
 
-    user = f"""# Review protocol
+    for bi, batch in enumerate(batches, start=1):
+        chunk = batch["diff"]
+        paths = list(batch.get("paths") or [])
+        was_truncated = bool(batch.get("truncated"))
+        pass_warnings: list[str] = []
+        if was_truncated:
+            for p in paths:
+                if p not in truncated_paths:
+                    truncated_paths.append(p)
+            note = (
+                f"Pass {bi}/{len(batches)}: file(s) {', '.join(paths) or 'unknown'} "
+                f"exceed the full context budget (~{budget} chars) alone — "
+                "sent a truncated prefix in this pass only (file was not split across passes)."
+            )
+            warnings.append(note)
+            pass_warnings.append(note)
+
+        batch_stats = diff_stats(chunk)
+        batch_header = (
+            f"\n# Automatic review pass {bi} of {len(batches)}\n"
+            f"Files in this pass (whole files only): "
+            f"{', '.join(paths) if paths else '(unknown)'}\n"
+            f"Changed lines in this pass: ~{batch_stats.get('total')}\n"
+            "Review only these files. Remaining files are reviewed in later "
+            "automatic passes after this one finishes.\n"
+        )
+
+        user = f"""# Review protocol
 {protocol}
 
 # Verdict format reference
@@ -1197,87 +1656,107 @@ Description:
 {f'''
 # PR conversation (author feedback — treat as authoritative for intent)
 {comments_blob}
-''' if comments_blob else ''}{hints_section}
+''' if comments_blob else ''}{hints_section}{batch_header}
 # Diff
 ```diff
-{diff}
+{chunk}
 ```
 """
-
-    print(f"neubodhi-ollama: host={host} model={model} pr=#{PR_NUMBER} diff_lines≈{nlines}")
-    ollama_metrics: dict = {
-        "input_tokens": None,
-        "output_tokens": None,
-        "duration_s": None,
-    }
-    try:
-        raw_text, ollama_metrics = ollama_chat(host, model, system_full, user)
-    except Exception as e:
-        print(f"neubodhi-ollama: ollama call failed: {e}", file=sys.stderr)
-        print_argus_review_summary(
-            pr=PR_NUMBER,
-            repo=repo_name,
-            author=author,
-            branch=branch,
-            model=model,
-            num_ctx=NUM_CTX,
-            input_tokens=None,
-            output_tokens=None,
-            diff_files=stats.get("files"),
-            diff_lines=nlines,
-            duration_s=None,
-            findings=[],
-            status="incomplete",
-        )
-        post_incomplete_and_die(
-            PR_NUMBER,
-            f"Ollama call failed: {type(e).__name__}: {e}",
-            hint="Check the self-hosted runner can reach Ollama and that the model is loaded.",
+        print(
+            f"neubodhi-ollama: pass {bi}/{len(batches)} "
+            f"files={len(paths)} lines≈{batch_stats.get('total')} "
+            f"paths={paths[:5]}{'…' if len(paths) > 5 else ''}",
+            flush=True,
         )
 
-    raw: dict | None = None
-    parse_err: Exception | None = None
-    try:
-        raw = extract_json(raw_text)
-    except ValueError as e:
-        parse_err = e
-        salvaged = salvage_findings_json(raw_text)
-        if salvaged:
+        b_findings: list[dict] = []
+        b_questions: list[str] = []
+        b_memory: list[str] = []
+        b_metrics: dict = {}
+        b_dropped = 0
+        b_err: str | None = None
+        attempts = 1 + max(0, max_batch_retries)
+        for attempt in range(1, attempts + 1):
+            b_findings, b_questions, b_memory, b_metrics, b_dropped, b_err = (
+                review_diff_with_ollama(host, model, system_full, user)
+            )
+            if not b_err:
+                break
             print(
-                f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
-                "from truncated JSON",
+                f"neubodhi-ollama: pass {bi} attempt {attempt}/{attempts} failed: {b_err}",
+                file=sys.stderr,
+            )
+
+        for key in ("input_tokens", "output_tokens", "duration_s"):
+            val = b_metrics.get(key)
+            if isinstance(val, (int, float)):
+                ollama_metrics[key] = int(ollama_metrics.get(key) or 0) + int(val)
+        dropped += b_dropped
+
+        # Post this pass's results immediately so the PR shows Review 1, 2, 3…
+        try:
+            pass_body = format_pass_summary(
+                pass_i=bi,
+                pass_n=len(batches),
+                paths=paths,
+                findings=b_findings if not b_err else [],
+                questions=b_questions if not b_err else [],
+                warnings=pass_warnings,
+                failed=bool(b_err),
+                error=str(b_err or ""),
+            )
+            post_review(PR_NUMBER, "COMMENT", pass_body)
+            print(
+                f"neubodhi-ollama: posted pass {bi}/{len(batches)} COMMENT "
+                f"({0 if b_err else len(b_findings)} finding(s))",
                 flush=True,
             )
-            raw = salvaged
+        except Exception as post_err:
+            print(
+                f"neubodhi-ollama: failed to post pass {bi} results: {post_err}",
+                file=sys.stderr,
+            )
+
+        if b_err:
+            batch_errors.append(f"pass {bi}/{len(batches)}: {b_err}")
+            path_failures.update(paths)
+            continue
+        if was_truncated:
+            path_failures.update(paths)
         else:
-            # Industry pattern: bump num_predict once when structured output truncates.
-            retry_predict = min(max(NUM_PREDICT * 2, 4096), 8192)
-            print(
-                f"neubodhi-ollama: JSON parse failed; retrying with num_predict={retry_predict}",
-                flush=True,
-            )
-            retry_user = (
-                user
-                + "\n\nRetry: return COMPLETE valid JSON only. "
-                "Max 8 findings. Keep each suggested_fix under 200 chars."
-            )
-            try:
-                raw_text, ollama_metrics = ollama_chat(
-                    host, model, system_full, retry_user, num_predict=retry_predict
-                )
-                raw = extract_json(raw_text)
-            except Exception as e2:
-                salvaged = salvage_findings_json(raw_text)
-                if salvaged:
-                    print(
-                        f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
-                        "after retry",
-                        flush=True,
-                    )
-                    raw = salvaged
-                else:
-                    parse_err = e2 if isinstance(e2, ValueError) else e
-    if raw is None:
+            path_successes.update(paths)
+            batch_ok += 1
+        findings.extend(b_findings)
+        questions.extend(b_questions)
+        memory_sugs.extend(b_memory)
+
+    # A path is covered only if every pass that included it succeeded without truncation.
+    covered_paths = path_successes - path_failures
+    coverage_md = format_coverage_section(
+        total_files=total_files,
+        intended_paths=intended_paths,
+        covered_paths=covered_paths,
+        batch_count=len(batches),
+        batch_ok=batch_ok,
+        truncated_paths=truncated_paths,
+        failed_batches=batch_errors,
+    )
+    missing_paths = [p for p in intended_paths if p not in covered_paths]
+    coverage_complete = (
+        not missing_paths
+        and not truncated_paths
+        and not batch_errors
+        and batch_ok == len(batches)
+        and len(batches) > 0
+    )
+    print(
+        f"neubodhi-ollama: coverage complete={coverage_complete} "
+        f"covered={len(covered_paths)}/{len(intended_paths)} "
+        f"passes_ok={batch_ok}/{len(batches)}",
+        flush=True,
+    )
+
+    if batch_errors and not findings and not questions and not det_findings:
         print_argus_review_summary(
             pr=PR_NUMBER,
             repo=repo_name,
@@ -1285,51 +1764,38 @@ Description:
             branch=branch,
             model=model,
             num_ctx=NUM_CTX,
-            input_tokens=ollama_metrics.get("input_tokens"),
-            output_tokens=ollama_metrics.get("output_tokens"),
+            input_tokens=ollama_metrics.get("input_tokens") or None,
+            output_tokens=ollama_metrics.get("output_tokens") or None,
             diff_files=stats.get("files"),
             diff_lines=nlines,
-            duration_s=ollama_metrics.get("duration_s"),
+            duration_s=ollama_metrics.get("duration_s") or None,
             findings=[],
             status="incomplete",
         )
         post_incomplete_and_die(
             PR_NUMBER,
-            "model returned invalid or non-JSON output",
+            "; ".join(batch_errors[:3]),
             hint=(
-                "Model cut off mid-JSON (generation budget / large prompt). "
-                "Re-run with `@neubodhi`, or split the PR if it keeps failing."
+                "Automatic multi-pass review failed before any findings. "
+                "Check Ollama connectivity, then re-run with `@neubodhi`."
             ),
-            preview=str(parse_err or ""),
+            preview=(batch_errors[0][:600] + "\n\n" + coverage_md)[:900],
+        )
+    if batch_errors:
+        warnings.append(
+            f"{len(batch_errors)} of {len(batches)} automatic pass(es) failed; "
+            "coverage incomplete."
+        )
+    if missing_paths:
+        warnings.append(
+            f"{len(missing_paths)} file(s) lack successful coverage "
+            f"(e.g. `{missing_paths[0]}`)."
+        )
+    if not coverage_complete:
+        warnings.append(
+            "Multi-pass coverage is incomplete — do not treat this as a full review."
         )
 
-    if not is_review_payload(raw):
-        print_argus_review_summary(
-            pr=PR_NUMBER,
-            repo=repo_name,
-            author=author,
-            branch=branch,
-            model=model,
-            num_ctx=NUM_CTX,
-            input_tokens=ollama_metrics.get("input_tokens"),
-            output_tokens=ollama_metrics.get("output_tokens"),
-            diff_files=stats.get("files"),
-            diff_lines=nlines,
-            duration_s=ollama_metrics.get("duration_s"),
-            findings=[],
-            status="incomplete",
-        )
-        post_incomplete_and_die(
-            PR_NUMBER,
-            "model JSON was not a Neubodhi review payload (missing `findings` array)",
-            hint=(
-                "The model echoed unrelated JSON from the diff instead of findings. "
-                "Split large PRs or reduce scope, then re-run with `@neubodhi`."
-            ),
-            preview=json.dumps(raw, ensure_ascii=False)[:600],
-        )
-
-    findings, dropped = normalize_findings(raw)
     if det_findings:
         try:
             _scripts_dir = Path(__file__).resolve().parent
@@ -1343,7 +1809,6 @@ Description:
                 f"neubodhi-ollama: advanced_findings merge failed: {merge_err}",
                 file=sys.stderr,
             )
-            # Fall back to concatenating public fields only
             for f in det_findings:
                 findings.append(
                     {
@@ -1354,29 +1819,52 @@ Description:
                         "suggested_fix": f.get("suggested_fix") or "",
                     }
                 )
+    findings = dedupe_findings(findings)
     findings, waived_notes = drop_waived_findings(findings, comments_blob)
-    if waived_notes:
-        warnings.extend(waived_notes)
-    questions = [str(q) for q in (raw.get("questions") or []) if str(q).strip()]
-    memory_sugs = [str(m) for m in (raw.get("memory_suggestions") or []) if str(m).strip()]
+    # Waivers are informational (author already addressed them) — not coverage failures.
+    info_notes: list[str] = list(waived_notes)
     if dropped:
         warnings.append(f"{dropped} finding(s) from the model were unparseable and discarded.")
         print(f"neubodhi-ollama: dropped {dropped} malformed finding(s)", file=sys.stderr)
-    if not findings and not questions:
-        # A silent empty result is the failure mode that looks like success. Log the
-        # response so "no findings" can always be told apart from "model said nothing".
-        print(f"neubodhi-ollama: empty result; raw head: {raw_text[:600]!r}", file=sys.stderr)
+    findings.sort(key=lambda x: SEV_RANK.get(x.get("severity") or "nit", 99))
+    if not findings and not questions and coverage_complete:
+        print(
+            "neubodhi-ollama: empty result across all passes (no findings/questions); "
+            "coverage complete",
+            file=sys.stderr,
+        )
+
+    for key in ("input_tokens", "output_tokens", "duration_s"):
+        if ollama_metrics.get(key) == 0 and not findings and batch_errors:
+            ollama_metrics[key] = None
 
     event = choose_event(findings, gate, allow_approve, author, never_approve)
     label = {"REQUEST_CHANGES": "REQUEST CHANGES", "APPROVE": "APPROVE", "COMMENT": "COMMENT"}[
         event
     ]
+    # Proof-safe: never approve when multi-pass coverage is incomplete or real warnings exist.
+    if not coverage_complete and event == "APPROVE":
+        event, label = "COMMENT", "COMMENT"
     if warnings and event == "APPROVE":
         event, label = "COMMENT", "COMMENT"
-    summary = format_summary(findings, questions, memory_sugs, label, warnings)
+    summary = format_summary(
+        findings,
+        questions,
+        memory_sugs,
+        label,
+        info_notes + warnings,
+        coverage_md=coverage_md,
+        incomplete=not coverage_complete,
+        pass_count=len(batches),
+    )
     post_review(PR_NUMBER, event, summary)
-    print(f"neubodhi-ollama: posted {event} with {len(findings)} finding(s)")
-    status = "incomplete" if (warnings and not findings) else "success"
+    print(
+        f"neubodhi-ollama: posted {event} with {len(findings)} finding(s) "
+        f"coverage_complete={coverage_complete}",
+        flush=True,
+    )
+    incomplete = not coverage_complete
+    status = "incomplete" if incomplete else "success"
     print_argus_review_summary(
         pr=PR_NUMBER,
         repo=repo_name,
@@ -1392,10 +1880,9 @@ Description:
         findings=findings,
         status=status,
     )
-    # An incomplete review must not show up as a green check.
-    if warnings and not findings:
-        die("review incomplete — see warnings above")
-    # Fail the Actions check so required status checks / branch protection can block merge.
+    # Incomplete multi-pass must fail the Actions check (not a green false clean).
+    if incomplete:
+        die("review incomplete — multi-pass coverage not complete")
     if event == "REQUEST_CHANGES":
         raise SystemExit(1)
 

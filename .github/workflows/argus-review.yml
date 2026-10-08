@@ -84,6 +84,8 @@ jobs:
     # Must be quoted: an unquoted `#` is a YAML comment and drops PR + actor.
     name: "${{ github.repository }} #${{ github.event.pull_request.number || github.event.issue.number }} @${{ github.actor }}"
     runs-on: ${{ needs.resolve.outputs.backend == 'ollama' && 'self-hosted' || 'ubuntu-latest' }}
+    # Large PRs run many sequential Ollama passes in one job; allow hours, not minutes.
+    timeout-minutes: 360
     steps:
       - name: Checkout Argus harness
         if: needs.resolve.outputs.backend == 'ollama'
@@ -108,9 +110,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # Review the calling repo's PR, not AccurateIC/argus.
           GH_REPO: ${{ github.repository }}
-          # 27B reviews of big prompts can take >10m; stream + long overall budget.
-          OLLAMA_TIMEOUT: "1800"
+          # Per Ollama call budget. Multi-pass PRs run many calls sequentially.
+          OLLAMA_TIMEOUT: "3600"
           OLLAMA_CHUNK_TIMEOUT: "600"
+          # Retry each failed automatic pass once before marking coverage incomplete.
+          ARGUS_BATCH_RETRIES: "1"
           # Context window for Ollama (tokens). Override via env if needed.
           OLLAMA_NUM_CTX: "65536"
           OLLAMA_NUM_PREDICT: "8192"
