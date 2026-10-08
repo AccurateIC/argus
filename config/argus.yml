@@ -60,12 +60,13 @@ paths:
 # summary table (prevents 40-comment noise-bombs).
 limits:
   max_inline_comments: 15
-  # 0 = review every changed file in one Actions run (sequential Ollama batches
-  # sized to fit num_ctx). Set >0 to hard-cap how many files are considered.
+  # 0 = review every changed file in one Actions run via automatic multi-pass
+  # Ollama batches sized to fit num_ctx. Set >0 to hard-cap file count.
   # Optional override: `@neubodhi first 40 files`.
+  # Coverage is proof-checked: incomplete passes fail the Actions check.
   max_files: 0
-  # Soft cap on changed lines *per Ollama batch* when packing files. Large PRs
-  # are reviewed across multiple batches in the same run (not skipped).
+  # Soft cap on changed lines *per automatic pass* when packing files. Oversized
+  # single files are hunk-split across further passes when possible.
   max_diff_lines: 8000
 
 # Claude model (used when backend: claude). Omit to inherit the action's default.

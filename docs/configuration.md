@@ -14,7 +14,8 @@ All behavior is driven by [`config/argus.yml`](../config/argus.yml).
 | `paths.skip` | Globs excluded from review entirely. |
 | `paths.strict` | Globs where every finding is bumped one severity and security/data-protection get extra scrutiny. |
 | `limits.max_inline_comments` | Cap on inline comments before the rest roll into the summary. |
-| `limits.max_diff_lines` | PRs larger than this get a "please split" note instead of a shallow review. |
+| `limits.max_files` | `0` = review every changed file via automatic multi-pass batches in one Actions run. `>0` hard-caps how many files are considered. Optional override: `@neubodhi first N files`. |
+| `limits.max_diff_lines` | Soft cap on changed lines **per automatic Ollama pass** when packing files. Large PRs are split into sequential passes (not skipped). |
 | `model` | Claude model when `backend: claude`. |
 | `ollama.host` | Ollama base URL (e.g. `http://192.168.10.46:11434`). |
 | `ollama.model` | Ollama model tag (e.g. `qwen3.6:27b`). |

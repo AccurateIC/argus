@@ -11,10 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from argus_ollama import (  # noqa: E402
     FINDINGS_JSON_SCHEMA,
+    build_review_batches,
+    dedupe_findings,
     diff_char_budget,
     diff_stats,
     extract_json,
     filter_diff,
+    format_coverage_section,
     format_diff_too_large,
     format_findings_metric,
     format_incomplete_review,
@@ -25,9 +28,11 @@ from argus_ollama import (  # noqa: E402
     normalize_findings,
     pack_file_batches,
     parse_max_files,
+    path_from_file_diff,
     print_argus_review_summary,
     salvage_findings_json,
     split_diff_by_file,
+    split_file_diff_by_hunk,
     take_first_n_files,
 )
 
@@ -205,6 +210,65 @@ assert len(one) == 1 and one[0].count("diff --git") == 5
 # Line cap packs by changed-line budget.
 by_lines = pack_file_batches(hunks, char_budget=100_000, max_lines=4)
 assert len(by_lines) >= 2
+
+# Proof-aware batches carry paths and never drop files from the ledger.
+built = build_review_batches(hunks, char_budget=80, max_lines=None)
+assert len(built) == 5
+assert {p for b in built for p in b["paths"]} == {f"f{i}.py" for i in range(5)}
+assert all(not b["truncated"] for b in built)
+
+# Oversized single @@ hunk is marked truncated rather than silently "complete".
+huge_hunk = (
+    "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"
+    "@@ -1,1 +1,1 @@\n"
+    + ("-x\n+y\n" * 200)
+)
+parts, trunc_flags = zip(*split_file_diff_by_hunk(huge_hunk, char_budget=120, max_lines=None))
+assert any(trunc_flags), trunc_flags
+assert path_from_file_diff(huge_hunk) == "big.py"
+
+# Multi-hunk file splits across passes without truncation when each @@ fits.
+multi = (
+    "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
+    "@@ -1,1 +1,1 @@\n-a\n+b\n"
+    "@@ -10,1 +10,1 @@\n-c\n+d\n"
+    "@@ -20,1 +20,1 @@\n-e\n+f\n"
+)
+mh = split_file_diff_by_hunk(multi, char_budget=90, max_lines=None)
+assert len(mh) >= 2, (len(mh), [len(c) for c, _ in mh])
+assert all(not t for _, t in mh)
+
+# Dedupe across passes.
+assert len(
+    dedupe_findings(
+        [
+            {"severity": "major", "location": "a.py:1", "finding": "bug"},
+            {"severity": "major", "location": "a.py:1", "finding": "bug"},
+            {"severity": "minor", "location": "a.py:2", "finding": "other"},
+        ]
+    )
+) == 2
+
+cov = format_coverage_section(
+    total_files=5,
+    intended_paths=["a.py", "b.py"],
+    covered_paths={"a.py", "b.py"},
+    batch_count=2,
+    batch_ok=2,
+    truncated_paths=[],
+    failed_batches=[],
+)
+assert "Coverage complete: **yes**" in cov
+cov_bad = format_coverage_section(
+    total_files=5,
+    intended_paths=["a.py", "b.py"],
+    covered_paths={"a.py"},
+    batch_count=2,
+    batch_ok=1,
+    truncated_paths=["b.py"],
+    failed_batches=["pass 2/2: boom"],
+)
+assert "Coverage complete: **NO**" in cov_bad
 
 assert format_findings_metric([]) == "Findings=0"
 assert format_findings_metric(
