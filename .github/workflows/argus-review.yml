@@ -119,9 +119,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # Stamp journal lines in IST inside the message (host timezone stays UTC).
           python3 scripts/argus_ollama.py 2>&1 | while IFS= read -r line || [ -n "$line" ]; do
             printf '%s\n' "$line"
-            logger -t argus -- "$line" || true
+            logger -t argus -- "$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S IST') ${line}" || true
           done
           exit "${PIPESTATUS[0]}"
 
