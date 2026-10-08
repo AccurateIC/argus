@@ -108,8 +108,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # Review the calling repo's PR, not AccurateIC/argus.
           GH_REPO: ${{ github.repository }}
-          # 27B reviews of big prompts can take >10m; stream + long overall budget.
-          OLLAMA_TIMEOUT: "1800"
+          # Multi-batch reviews of large PRs can take a long time; per-call budget.
+          OLLAMA_TIMEOUT: "3600"
           OLLAMA_CHUNK_TIMEOUT: "600"
           # Context window for Ollama (tokens). Override via env if needed.
           OLLAMA_NUM_CTX: "65536"

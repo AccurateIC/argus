@@ -23,9 +23,11 @@ from argus_ollama import (  # noqa: E402
     is_review_payload,
     md_table_cell,
     normalize_findings,
+    pack_file_batches,
     parse_max_files,
     print_argus_review_summary,
     salvage_findings_json,
+    split_diff_by_file,
     take_first_n_files,
 )
 
@@ -176,7 +178,7 @@ try:
 except ValueError:
     pass
 
-# File window: first N hunks only; comment override.
+# File window: first N hunks only; comment override. n<=0 keeps all.
 many = "".join(
     f"diff --git a/f{i}.py b/f{i}.py\n--- a/f{i}.py\n+++ b/f{i}.py\n@@ -1 +1 @@\n-old\n+new\n"
     for i in range(5)
@@ -186,9 +188,23 @@ assert (kept, total) == (2, 5)
 assert sliced.count("diff --git") == 2
 assert "f0.py" in sliced and "f1.py" in sliced and "f4.py" not in sliced
 assert take_first_n_files(many, 99)[1:] == (5, 5)
+assert take_first_n_files(many, 0)[1:] == (5, 5)
 assert parse_max_files("@neubodhi check only the first 20 files", 10) == 20
 assert parse_max_files("@neubodhi", 20) == 20
-assert parse_max_files("first 999 files", 20) == 200
+assert parse_max_files("@neubodhi", 0) == 0
+assert parse_max_files("first 999 files", 20) == 500
+
+# Sequential packing: fit files into context-sized batches.
+hunks = split_diff_by_file(many)
+# Tiny budget → one file per batch.
+tiny = pack_file_batches(hunks, char_budget=80, max_lines=None)
+assert len(tiny) == 5, tiny
+# Huge budget → single batch with all files.
+one = pack_file_batches(hunks, char_budget=100_000, max_lines=None)
+assert len(one) == 1 and one[0].count("diff --git") == 5
+# Line cap packs by changed-line budget.
+by_lines = pack_file_batches(hunks, char_budget=100_000, max_lines=4)
+assert len(by_lines) >= 2
 
 assert format_findings_metric([]) == "Findings=0"
 assert format_findings_metric(

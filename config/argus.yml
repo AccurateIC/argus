@@ -60,11 +60,12 @@ paths:
 # summary table (prevents 40-comment noise-bombs).
 limits:
   max_inline_comments: 15
-  # Only the first N files in the unified diff are sent to the model (rest skipped
-  # with a warning). Override per run: `@neubodhi first 40 files`.
-  max_files: 20
-  # Skip review entirely for PRs larger than this many changed lines (after the
-  # file window) and instead post a note asking for the PR to be split.
+  # 0 = review every changed file in one Actions run (sequential Ollama batches
+  # sized to fit num_ctx). Set >0 to hard-cap how many files are considered.
+  # Optional override: `@neubodhi first 40 files`.
+  max_files: 0
+  # Soft cap on changed lines *per Ollama batch* when packing files. Large PRs
+  # are reviewed across multiple batches in the same run (not skipped).
   max_diff_lines: 8000
 
 # Claude model (used when backend: claude). Omit to inherit the action's default.

@@ -59,9 +59,10 @@ def parse_simple_yaml(text: str) -> dict:
         "model": "claude-sonnet-4-6",
         "verdict": {"allow_approve": False, "never_approve_authors": []},
         "limits": {
-            "max_diff_lines": 4000,
+            "max_diff_lines": 8000,
             "max_inline_comments": 15,
-            "max_files": 20,
+            # 0 = review every file via sequential context-sized batches.
+            "max_files": 0,
         },
         "ollama": {"host": "http://127.0.0.1:11434", "model": "qwen3.6:27b"},
         "paths": {"skip": [], "strict": []},
@@ -425,7 +426,10 @@ def split_diff_by_file(diff: str) -> list[str]:
 
 
 def take_first_n_files(diff: str, n: int) -> tuple[str, int, int]:
-    """Keep only the first n file hunks. Returns (sliced, kept, total)."""
+    """Keep only the first n file hunks. Returns (sliced, kept, total).
+
+    ``n <= 0`` means unlimited (keep every file hunk).
+    """
     parts = split_diff_by_file(diff)
     total = len(parts)
     if n <= 0 or total <= n:
@@ -434,12 +438,75 @@ def take_first_n_files(diff: str, n: int) -> tuple[str, int, int]:
     return "\n".join(kept) + "\n", n, total
 
 
+def pack_file_batches(
+    file_hunks: list[str],
+    *,
+    char_budget: int,
+    max_lines: int | None,
+) -> list[str]:
+    """Pack file hunks into sequential batches that fit the model window.
+
+    Packs consecutive files until the next file would exceed ``char_budget``
+    or ``max_lines`` (changed +/- lines). A single oversized file becomes its
+    own batch (caller may still truncate that batch to the char budget).
+    """
+    if not file_hunks:
+        return []
+    budget = max(1, char_budget)
+    line_cap = max_lines if (max_lines is not None and max_lines > 0) else None
+    batches: list[str] = []
+    cur: list[str] = []
+    cur_chars = 0
+    cur_lines = 0
+
+    def flush() -> None:
+        nonlocal cur, cur_chars, cur_lines
+        if not cur:
+            return
+        joined = "\n".join(cur)
+        if not joined.endswith("\n"):
+            joined += "\n"
+        batches.append(joined)
+        cur = []
+        cur_chars = 0
+        cur_lines = 0
+
+    for hunk in file_hunks:
+        h = hunk if hunk.endswith("\n") else hunk + "\n"
+        h_chars = len(h)
+        h_lines = int(diff_stats(h).get("total") or 0)
+        alone_oversized = h_chars > budget or (
+            line_cap is not None and h_lines > line_cap
+        )
+        if alone_oversized and not cur:
+            batches.append(h)
+            continue
+        would_exceed = cur and (
+            cur_chars + h_chars > budget
+            or (line_cap is not None and cur_lines + h_lines > line_cap)
+        )
+        if would_exceed:
+            flush()
+            if alone_oversized:
+                batches.append(h)
+                continue
+        cur.append(h.rstrip("\n"))
+        cur_chars += h_chars
+        cur_lines += h_lines
+    flush()
+    return batches
+
+
 def parse_max_files(comment: str, default: int) -> int:
-    """`@neubodhi … first 20 files …` overrides config. Caps at 200."""
+    """`@neubodhi … first 20 files …` overrides config.
+
+    Caps at 500. Returns ``default`` unchanged when the phrase is absent
+    (``0`` means unlimited / review all files).
+    """
     m = re.search(r"\bfirst\s+(\d+)\s+files?\b", comment or "", re.I)
     if not m:
         return default
-    return max(1, min(int(m.group(1)), 200))
+    return max(1, min(int(m.group(1)), 500))
 
 
 def ollama_chat(
@@ -931,6 +998,99 @@ def post_incomplete_and_die(pr: str, reason: str, *, hint: str = "", preview: st
     die(f"review incomplete — {reason}")
 
 
+def review_diff_with_ollama(
+    host: str,
+    model: str,
+    system_full: str,
+    user: str,
+) -> tuple[list[dict], list[str], list[str], dict, int, str | None]:
+    """One Ollama review call + JSON extract/normalize.
+
+    Returns (findings, questions, memory_suggestions, metrics, dropped, error).
+    ``error`` is None on success.
+    """
+    empty_metrics: dict = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "duration_s": None,
+    }
+    try:
+        raw_text, metrics = ollama_chat(host, model, system_full, user)
+    except Exception as e:
+        return [], [], [], empty_metrics, 0, f"Ollama call failed: {type(e).__name__}: {e}"
+
+    raw: dict | None = None
+    parse_err: Exception | None = None
+    try:
+        raw = extract_json(raw_text)
+    except ValueError as e:
+        parse_err = e
+        salvaged = salvage_findings_json(raw_text)
+        if salvaged:
+            print(
+                f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
+                "from truncated JSON",
+                flush=True,
+            )
+            raw = salvaged
+        else:
+            retry_predict = min(max(NUM_PREDICT * 2, 4096), 8192)
+            print(
+                f"neubodhi-ollama: JSON parse failed; retrying with num_predict={retry_predict}",
+                flush=True,
+            )
+            retry_user = (
+                user
+                + "\n\nRetry: return COMPLETE valid JSON only. "
+                "Max 8 findings. Keep each suggested_fix under 200 chars."
+            )
+            try:
+                raw_text, metrics = ollama_chat(
+                    host, model, system_full, retry_user, num_predict=retry_predict
+                )
+                raw = extract_json(raw_text)
+            except Exception as e2:
+                salvaged = salvage_findings_json(raw_text)
+                if salvaged:
+                    print(
+                        f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
+                        "after retry",
+                        flush=True,
+                    )
+                    raw = salvaged
+                else:
+                    parse_err = e2 if isinstance(e2, ValueError) else e
+
+    if raw is None:
+        return (
+            [],
+            [],
+            [],
+            metrics,
+            0,
+            f"model returned invalid or non-JSON output ({parse_err})",
+        )
+    if not is_review_payload(raw):
+        return (
+            [],
+            [],
+            [],
+            metrics,
+            0,
+            "model JSON was not a Neubodhi review payload (missing `findings` array)",
+        )
+
+    findings, dropped = normalize_findings(raw)
+    questions = [str(q) for q in (raw.get("questions") or []) if str(q).strip()]
+    memory_sugs = [str(m) for m in (raw.get("memory_suggestions") or []) if str(m).strip()]
+    if not findings and not questions:
+        print(
+            f"neubodhi-ollama: empty result; raw head: {raw_text[:600]!r}",
+            file=sys.stderr,
+        )
+    return findings, questions, memory_sugs, metrics, dropped, None
+
+
 def main() -> None:
     if not PR_NUMBER:
         die("PR_NUMBER (or ARGUS_PR_NUMBER) is required")
@@ -956,8 +1116,10 @@ def main() -> None:
     gate = cfg.get("gate") or "major"
     allow_approve = bool((cfg.get("verdict") or {}).get("allow_approve"))
     never_approve = list((cfg.get("verdict") or {}).get("never_approve_authors") or [])
-    max_diff = int((cfg.get("limits") or {}).get("max_diff_lines") or 4000)
-    max_files = int((cfg.get("limits") or {}).get("max_files") or 20)
+    # Soft per-batch line budget when packing files (not a whole-PR skip).
+    max_diff = int((cfg.get("limits") or {}).get("max_diff_lines") or 8000)
+    # 0 = unlimited (review all files sequentially). Comment can still cap.
+    max_files = int((cfg.get("limits") or {}).get("max_files") or 0)
     max_files = parse_max_files(os.environ.get("PR_COMMENT") or "", max_files)
     skip = list((cfg.get("paths") or {}).get("skip") or [])
     skills = cfg.get("skills") or []
@@ -1035,9 +1197,9 @@ def main() -> None:
     diff, kept_files, total_files = take_first_n_files(diff, max_files)
     if total_files > kept_files:
         warnings.append(
-            f"Reviewed first {kept_files} of {total_files} files "
-            f"(limit `max_files={max_files}`). Re-run after splitting, or "
-            f"`@neubodhi first N files` with a higher N (cap 200)."
+            f"Considering first {kept_files} of {total_files} files "
+            f"(limit `max_files={max_files}`). Use `@neubodhi first N files` or set "
+            f"`limits.max_files: 0` to review all."
         )
         print(
             f"neubodhi-ollama: limiting to first {kept_files}/{total_files} files",
@@ -1059,39 +1221,6 @@ def main() -> None:
             "This is **not** a clean bill of health.\n",
         )
         die(f"nothing to review — {reason}")
-    if nlines > max_diff:
-        # Stats here are for the sliced window so the table matches what we refused.
-        full_note = (
-            f"After taking the first {kept_files} files, still "
-            f"{nlines:,} changed lines (limit {max_diff:,})."
-            if total_files > kept_files
-            else ""
-        )
-        post_review(
-            PR_NUMBER,
-            "COMMENT",
-            format_diff_too_large(stats, max_diff, note=full_note),
-        )
-        print(
-            f"neubodhi-ollama: skipped large diff "
-            f"({nlines} lines, {stats['files']} files, +{stats['additions']}/−{stats['deletions']})"
-        )
-        print_argus_review_summary(
-            pr=PR_NUMBER,
-            repo=repo_name,
-            author=author,
-            branch=branch,
-            model=model,
-            num_ctx=NUM_CTX,
-            input_tokens=None,
-            output_tokens=None,
-            diff_files=stats.get("files"),
-            diff_lines=nlines,
-            duration_s=None,
-            findings=[],
-            status="skipped",
-        )
-        return
 
     system = read_text(ROOT / "prompts" / "system.md")
     protocol = read_text(ROOT / "prompts" / "review.md")
@@ -1130,22 +1259,41 @@ Return ONLY valid JSON (no markdown fences) with this schema:
 }}
 Precision over volume. Do not re-flag accepted-patterns. Cite path:line.
 Severity gate in config is `{gate}`.
-Only review the diff provided (it may be a partial file window).
+Only review the diff provided (it may be one batch of a multi-batch PR review).
 """
 
-    budget = diff_char_budget(
-        NUM_CTX,
-        NUM_PREDICT,
-        len(system_full) + len(protocol) + len(verdict_fmt) + len(skills_blob)
-        + len(memory_blob) + len(comments_blob) + len(title) + len(body) + 512,
+    overhead = (
+        len(system_full)
+        + len(protocol)
+        + len(verdict_fmt)
+        + len(skills_blob)
+        + len(memory_blob)
+        + len(comments_blob)
+        + len(title)
+        + len(body)
+        + 768
     )
-    if len(diff) > budget:
-        warnings.append(
-            f"Diff is {len(diff)} chars but only ~{budget} fit the {NUM_CTX}-token context — "
-            f"it was truncated. Split this PR or raise `OLLAMA_NUM_CTX`."
+    budget = diff_char_budget(NUM_CTX, NUM_PREDICT, overhead)
+    file_hunks = split_diff_by_file(diff)
+    batches = pack_file_batches(
+        file_hunks,
+        char_budget=budget,
+        max_lines=max_diff,
+    )
+    if not batches:
+        batches = [diff if diff.endswith("\n") else diff + "\n"]
+
+    print(
+        f"neubodhi-ollama: host={host} model={model} pr=#{PR_NUMBER} "
+        f"files={kept_files}/{total_files} lines≈{nlines} batches={len(batches)}",
+        flush=True,
+    )
+    review_notes: list[str] = []
+    if len(batches) > 1:
+        review_notes.append(
+            f"Reviewed all {kept_files} file(s) in {len(batches)} sequential "
+            f"batches (context-sized; `max_diff_lines`={max_diff} per batch)."
         )
-        print(f"neubodhi-ollama: truncating diff {len(diff)} -> {budget} chars", file=sys.stderr)
-        diff = diff[:budget]
 
     det_findings: list[dict] = []
     loop_hint_lines: list[str] = []
@@ -1156,6 +1304,7 @@ Only review the diff provided (it may be a partial file window).
                 sys.path.insert(0, str(_scripts_dir))
             from advanced_findings import run_advanced_findings  # noqa: E402
 
+            # Deterministic analyzers see the full (non-truncated) file set once.
             det_findings, loop_hint_lines, _adv_note = run_advanced_findings(
                 diff,
                 PR_NUMBER,
@@ -1168,15 +1317,49 @@ Only review the diff provided (it may be a partial file window).
             )
             det_findings, loop_hint_lines = [], []
 
-    hints_section = ""
-    if loop_hint_lines:
-        hints_section = (
-            "\n# Advanced analysis hints (confirm or dismiss — do not rubber-stamp)\n"
-            + "\n".join(loop_hint_lines)
-            + "\n"
-        )
+    findings: list[dict] = []
+    questions: list[str] = []
+    memory_sugs: list[str] = []
+    dropped = 0
+    ollama_metrics: dict = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "duration_s": 0,
+    }
+    batch_errors: list[str] = []
 
-    user = f"""# Review protocol
+    for bi, batch_diff in enumerate(batches, start=1):
+        batch_stats = diff_stats(batch_diff)
+        chunk = batch_diff
+        if len(chunk) > budget:
+            warnings.append(
+                f"Batch {bi}/{len(batches)}: one file/window is {len(chunk)} chars but "
+                f"only ~{budget} fit `{NUM_CTX}` context — truncated that batch."
+            )
+            print(
+                f"neubodhi-ollama: truncating batch {bi} {len(chunk)} -> {budget} chars",
+                file=sys.stderr,
+            )
+            chunk = chunk[:budget]
+
+        hints_section = ""
+        if loop_hint_lines and bi == 1:
+            hints_section = (
+                "\n# Advanced analysis hints (confirm or dismiss — do not rubber-stamp)\n"
+                + "\n".join(loop_hint_lines)
+                + "\n"
+            )
+
+        batch_header = ""
+        if len(batches) > 1:
+            batch_header = (
+                f"\n# Batch {bi} of {len(batches)} "
+                f"({batch_stats.get('files')} files, "
+                f"~{batch_stats.get('total')} changed lines)\n"
+                "Review only this batch's diff; other files are reviewed in other batches.\n"
+            )
+
+        user = f"""# Review protocol
 {protocol}
 
 # Verdict format reference
@@ -1197,23 +1380,34 @@ Description:
 {f'''
 # PR conversation (author feedback — treat as authoritative for intent)
 {comments_blob}
-''' if comments_blob else ''}{hints_section}
+''' if comments_blob else ''}{hints_section}{batch_header}
 # Diff
 ```diff
-{diff}
+{chunk}
 ```
 """
+        print(
+            f"neubodhi-ollama: batch {bi}/{len(batches)} "
+            f"files≈{batch_stats.get('files')} lines≈{batch_stats.get('total')}",
+            flush=True,
+        )
+        b_findings, b_questions, b_memory, b_metrics, b_dropped, b_err = (
+            review_diff_with_ollama(host, model, system_full, user)
+        )
+        for key in ("input_tokens", "output_tokens", "duration_s"):
+            val = b_metrics.get(key)
+            if isinstance(val, (int, float)):
+                ollama_metrics[key] = int(ollama_metrics.get(key) or 0) + int(val)
+        dropped += b_dropped
+        if b_err:
+            batch_errors.append(f"batch {bi}/{len(batches)}: {b_err}")
+            print(f"neubodhi-ollama: {batch_errors[-1]}", file=sys.stderr)
+            continue
+        findings.extend(b_findings)
+        questions.extend(b_questions)
+        memory_sugs.extend(b_memory)
 
-    print(f"neubodhi-ollama: host={host} model={model} pr=#{PR_NUMBER} diff_lines≈{nlines}")
-    ollama_metrics: dict = {
-        "input_tokens": None,
-        "output_tokens": None,
-        "duration_s": None,
-    }
-    try:
-        raw_text, ollama_metrics = ollama_chat(host, model, system_full, user)
-    except Exception as e:
-        print(f"neubodhi-ollama: ollama call failed: {e}", file=sys.stderr)
+    if batch_errors and not findings and not questions and not det_findings:
         print_argus_review_summary(
             pr=PR_NUMBER,
             repo=repo_name,
@@ -1221,115 +1415,29 @@ Description:
             branch=branch,
             model=model,
             num_ctx=NUM_CTX,
-            input_tokens=None,
-            output_tokens=None,
+            input_tokens=ollama_metrics.get("input_tokens") or None,
+            output_tokens=ollama_metrics.get("output_tokens") or None,
             diff_files=stats.get("files"),
             diff_lines=nlines,
-            duration_s=None,
+            duration_s=ollama_metrics.get("duration_s") or None,
             findings=[],
             status="incomplete",
         )
         post_incomplete_and_die(
             PR_NUMBER,
-            f"Ollama call failed: {type(e).__name__}: {e}",
-            hint="Check the self-hosted runner can reach Ollama and that the model is loaded.",
-        )
-
-    raw: dict | None = None
-    parse_err: Exception | None = None
-    try:
-        raw = extract_json(raw_text)
-    except ValueError as e:
-        parse_err = e
-        salvaged = salvage_findings_json(raw_text)
-        if salvaged:
-            print(
-                f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
-                "from truncated JSON",
-                flush=True,
-            )
-            raw = salvaged
-        else:
-            # Industry pattern: bump num_predict once when structured output truncates.
-            retry_predict = min(max(NUM_PREDICT * 2, 4096), 8192)
-            print(
-                f"neubodhi-ollama: JSON parse failed; retrying with num_predict={retry_predict}",
-                flush=True,
-            )
-            retry_user = (
-                user
-                + "\n\nRetry: return COMPLETE valid JSON only. "
-                "Max 8 findings. Keep each suggested_fix under 200 chars."
-            )
-            try:
-                raw_text, ollama_metrics = ollama_chat(
-                    host, model, system_full, retry_user, num_predict=retry_predict
-                )
-                raw = extract_json(raw_text)
-            except Exception as e2:
-                salvaged = salvage_findings_json(raw_text)
-                if salvaged:
-                    print(
-                        f"neubodhi-ollama: salvaged {len(salvaged['findings'])} finding(s) "
-                        "after retry",
-                        flush=True,
-                    )
-                    raw = salvaged
-                else:
-                    parse_err = e2 if isinstance(e2, ValueError) else e
-    if raw is None:
-        print_argus_review_summary(
-            pr=PR_NUMBER,
-            repo=repo_name,
-            author=author,
-            branch=branch,
-            model=model,
-            num_ctx=NUM_CTX,
-            input_tokens=ollama_metrics.get("input_tokens"),
-            output_tokens=ollama_metrics.get("output_tokens"),
-            diff_files=stats.get("files"),
-            diff_lines=nlines,
-            duration_s=ollama_metrics.get("duration_s"),
-            findings=[],
-            status="incomplete",
-        )
-        post_incomplete_and_die(
-            PR_NUMBER,
-            "model returned invalid or non-JSON output",
+            "; ".join(batch_errors[:3]),
             hint=(
-                "Model cut off mid-JSON (generation budget / large prompt). "
-                "Re-run with `@neubodhi`, or split the PR if it keeps failing."
+                "One or more sequential review batches failed. "
+                "Check Ollama connectivity, then re-run with `@neubodhi`."
             ),
-            preview=str(parse_err or ""),
+            preview=batch_errors[0][:600],
+        )
+    if batch_errors:
+        warnings.append(
+            f"{len(batch_errors)} of {len(batches)} batch(es) failed; "
+            "findings below may be incomplete."
         )
 
-    if not is_review_payload(raw):
-        print_argus_review_summary(
-            pr=PR_NUMBER,
-            repo=repo_name,
-            author=author,
-            branch=branch,
-            model=model,
-            num_ctx=NUM_CTX,
-            input_tokens=ollama_metrics.get("input_tokens"),
-            output_tokens=ollama_metrics.get("output_tokens"),
-            diff_files=stats.get("files"),
-            diff_lines=nlines,
-            duration_s=ollama_metrics.get("duration_s"),
-            findings=[],
-            status="incomplete",
-        )
-        post_incomplete_and_die(
-            PR_NUMBER,
-            "model JSON was not a Neubodhi review payload (missing `findings` array)",
-            hint=(
-                "The model echoed unrelated JSON from the diff instead of findings. "
-                "Split large PRs or reduce scope, then re-run with `@neubodhi`."
-            ),
-            preview=json.dumps(raw, ensure_ascii=False)[:600],
-        )
-
-    findings, dropped = normalize_findings(raw)
     if det_findings:
         try:
             _scripts_dir = Path(__file__).resolve().parent
@@ -1357,15 +1465,20 @@ Description:
     findings, waived_notes = drop_waived_findings(findings, comments_blob)
     if waived_notes:
         warnings.extend(waived_notes)
-    questions = [str(q) for q in (raw.get("questions") or []) if str(q).strip()]
-    memory_sugs = [str(m) for m in (raw.get("memory_suggestions") or []) if str(m).strip()]
     if dropped:
         warnings.append(f"{dropped} finding(s) from the model were unparseable and discarded.")
         print(f"neubodhi-ollama: dropped {dropped} malformed finding(s)", file=sys.stderr)
-    if not findings and not questions:
-        # A silent empty result is the failure mode that looks like success. Log the
-        # response so "no findings" can always be told apart from "model said nothing".
-        print(f"neubodhi-ollama: empty result; raw head: {raw_text[:600]!r}", file=sys.stderr)
+    findings.sort(key=lambda x: SEV_RANK.get(x.get("severity") or "nit", 99))
+    if not findings and not questions and not batch_errors:
+        print(
+            "neubodhi-ollama: empty result across all batches (no findings/questions)",
+            file=sys.stderr,
+        )
+
+    # Summed metrics stay 0 when no batch reported tokens — surface as unknown.
+    for key in ("input_tokens", "output_tokens", "duration_s"):
+        if ollama_metrics.get(key) == 0 and not findings and batch_errors:
+            ollama_metrics[key] = None
 
     event = choose_event(findings, gate, allow_approve, author, never_approve)
     label = {"REQUEST_CHANGES": "REQUEST CHANGES", "APPROVE": "APPROVE", "COMMENT": "COMMENT"}[
@@ -1373,10 +1486,14 @@ Description:
     ]
     if warnings and event == "APPROVE":
         event, label = "COMMENT", "COMMENT"
-    summary = format_summary(findings, questions, memory_sugs, label, warnings)
+    summary = format_summary(
+        findings, questions, memory_sugs, label, review_notes + warnings
+    )
     post_review(PR_NUMBER, event, summary)
     print(f"neubodhi-ollama: posted {event} with {len(findings)} finding(s)")
-    status = "incomplete" if (warnings and not findings) else "success"
+    # Informational batch notes are not incompleteness; real gaps live in `warnings`.
+    incomplete = bool(warnings) and not findings
+    status = "incomplete" if incomplete else "success"
     print_argus_review_summary(
         pr=PR_NUMBER,
         repo=repo_name,
@@ -1393,7 +1510,7 @@ Description:
         status=status,
     )
     # An incomplete review must not show up as a green check.
-    if warnings and not findings:
+    if incomplete:
         die("review incomplete — see warnings above")
     # Fail the Actions check so required status checks / branch protection can block merge.
     if event == "REQUEST_CHANGES":
