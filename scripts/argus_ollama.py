@@ -520,10 +520,12 @@ def split_file_diff_by_hunk(
             raw = header_text + piece
             if not raw.endswith("\n"):
                 raw += "\n"
+            # truncated=True only when we actually chop bytes. Soft line_cap
+            # overflow that still fits char budget is sent whole as its own pass.
             if len(raw) > budget:
                 out.append((raw[:budget], True))
             else:
-                out.append((raw, line_cap is not None and p_lines > line_cap))
+                out.append((raw, False))
             continue
         if pack and (
             pack_chars + p_chars > budget
@@ -1737,8 +1739,8 @@ Description:
                 )
     findings = dedupe_findings(findings)
     findings, waived_notes = drop_waived_findings(findings, comments_blob)
-    if waived_notes:
-        warnings.extend(waived_notes)
+    # Waivers are informational (author already addressed them) — not coverage failures.
+    info_notes: list[str] = list(waived_notes)
     if dropped:
         warnings.append(f"{dropped} finding(s) from the model were unparseable and discarded.")
         print(f"neubodhi-ollama: dropped {dropped} malformed finding(s)", file=sys.stderr)
@@ -1758,7 +1760,7 @@ Description:
     label = {"REQUEST_CHANGES": "REQUEST CHANGES", "APPROVE": "APPROVE", "COMMENT": "COMMENT"}[
         event
     ]
-    # Proof-safe: never approve / never look "clean" when coverage is incomplete.
+    # Proof-safe: never approve when multi-pass coverage is incomplete or real warnings exist.
     if not coverage_complete and event == "APPROVE":
         event, label = "COMMENT", "COMMENT"
     if warnings and event == "APPROVE":
@@ -1768,7 +1770,7 @@ Description:
         questions,
         memory_sugs,
         label,
-        warnings,
+        info_notes + warnings,
         coverage_md=coverage_md,
         incomplete=not coverage_complete,
     )

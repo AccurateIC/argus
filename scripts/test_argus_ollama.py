@@ -217,7 +217,7 @@ assert len(built) == 5
 assert {p for b in built for p in b["paths"]} == {f"f{i}.py" for i in range(5)}
 assert all(not b["truncated"] for b in built)
 
-# Oversized single @@ hunk is marked truncated rather than silently "complete".
+# Oversized single @@ hunk is marked truncated only when bytes are chopped.
 huge_hunk = (
     "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"
     "@@ -1,1 +1,1 @@\n"
@@ -226,6 +226,9 @@ huge_hunk = (
 parts, trunc_flags = zip(*split_file_diff_by_hunk(huge_hunk, char_budget=120, max_lines=None))
 assert any(trunc_flags), trunc_flags
 assert path_from_file_diff(huge_hunk) == "big.py"
+# Soft line_cap alone must NOT mark truncated if the full hunk fits chars.
+soft = split_file_diff_by_hunk(huge_hunk, char_budget=100_000, max_lines=50)
+assert len(soft) == 1 and soft[0][1] is False and soft[0][0].rstrip("\n") == huge_hunk.rstrip("\n")
 
 # Multi-hunk file splits across passes without truncation when each @@ fits.
 multi = (
