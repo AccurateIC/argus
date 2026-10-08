@@ -21,6 +21,7 @@ from argus_ollama import (  # noqa: E402
     format_diff_too_large,
     format_findings_metric,
     format_incomplete_review,
+    format_pass_summary,
     format_summary,
     is_github_diff_too_large,
     is_review_payload,
@@ -32,7 +33,6 @@ from argus_ollama import (  # noqa: E402
     print_argus_review_summary,
     salvage_findings_json,
     split_diff_by_file,
-    split_file_diff_by_hunk,
     take_first_n_files,
 )
 
@@ -51,7 +51,7 @@ assert dropped == 2, dropped
 
 # Empty findings + a warning must not read as clean.
 body = format_summary([], [], [], "COMMENT", ["model returned no usable findings"])
-assert "Review incomplete" in body, body
+assert "incomplete" in body.lower() or "unreviewed" in body.lower(), body
 assert format_summary([], [], [], "COMMENT").count("No findings.") == 1
 
 # Budget shrinks with overhead and never goes negative (3 chars/token).
@@ -217,29 +217,50 @@ assert len(built) == 5
 assert {p for b in built for p in b["paths"]} == {f"f{i}.py" for i in range(5)}
 assert all(not b["truncated"] for b in built)
 
-# Oversized single @@ hunk is marked truncated only when bytes are chopped.
+# Whole-file rule: never put half a file in pass 1 and half in pass 2.
 huge_hunk = (
     "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"
     "@@ -1,1 +1,1 @@\n"
     + ("-x\n+y\n" * 200)
 )
-parts, trunc_flags = zip(*split_file_diff_by_hunk(huge_hunk, char_budget=120, max_lines=None))
-assert any(trunc_flags), trunc_flags
 assert path_from_file_diff(huge_hunk) == "big.py"
-# Soft line_cap alone must NOT mark truncated if the full hunk fits chars.
-soft = split_file_diff_by_hunk(huge_hunk, char_budget=100_000, max_lines=50)
-assert len(soft) == 1 and soft[0][1] is False and soft[0][0].rstrip("\n") == huge_hunk.rstrip("\n")
+# File alone over char budget → one pass, truncated (not multi-pass hunk split).
+alone = build_review_batches([huge_hunk], char_budget=120, max_lines=None)
+assert len(alone) == 1 and alone[0]["truncated"] is True and alone[0]["paths"] == ["big.py"]
+# Soft line_cap alone → still one whole-file pass, not truncated if chars fit.
+soft_b = build_review_batches([huge_hunk], char_budget=100_000, max_lines=50)
+assert len(soft_b) == 1 and soft_b[0]["truncated"] is False
 
-# Multi-hunk file splits across passes without truncation when each @@ fits.
+# Multi-hunk file stays in ONE pass (whole file), never split across passes.
 multi = (
     "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n"
     "@@ -1,1 +1,1 @@\n-a\n+b\n"
     "@@ -10,1 +10,1 @@\n-c\n+d\n"
     "@@ -20,1 +20,1 @@\n-e\n+f\n"
 )
-mh = split_file_diff_by_hunk(multi, char_budget=90, max_lines=None)
-assert len(mh) >= 2, (len(mh), [len(c) for c, _ in mh])
-assert all(not t for _, t in mh)
+# Small leftover budget with another file first → m.py moves wholly to pass 2.
+small = (
+    "diff --git a/s.py b/s.py\n--- a/s.py\n+++ b/s.py\n"
+    "@@ -1 +1 @@\n-o\n+n\n"
+)
+packed = build_review_batches(
+    [small, multi], char_budget=len(small) + 30, max_lines=None
+)
+assert len(packed) >= 2
+assert packed[0]["paths"] == ["s.py"]
+assert "m.py" in packed[1]["paths"]
+assert all(p.count("diff --git") == len(p_paths) for p, p_paths in
+           ((b["diff"], b["paths"]) for b in packed))
+
+pass_md = format_pass_summary(
+    pass_i=1,
+    pass_n=3,
+    paths=["a.py"],
+    findings=[{"severity": "minor", "skill": "correctness", "location": "a.py:1",
+               "finding": "x", "suggested_fix": ""}],
+    questions=[],
+)
+assert "Pass 1 of 3" in pass_md and "a.py" in pass_md
 
 # Dedupe across passes.
 assert len(

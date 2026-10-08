@@ -545,12 +545,17 @@ def pack_file_batches(
     char_budget: int,
     max_lines: int | None,
 ) -> list[str]:
-    """Pack file hunks into sequential batches that fit the model window.
+    """Pack whole files into sequential batches that fit the model window.
 
-    Oversized files are split on ``@@`` hunk boundaries when possible.
-    Backward-compatible: returns joined diff strings only.
+    Never splits one file across two batches. Backward-compatible: returns
+    joined diff strings only.
     """
-    return [b["diff"] for b in build_review_batches(file_hunks, char_budget=char_budget, max_lines=max_lines)]
+    return [
+        b["diff"]
+        for b in build_review_batches(
+            file_hunks, char_budget=char_budget, max_lines=max_lines
+        )
+    ]
 
 
 def build_review_batches(
@@ -559,87 +564,77 @@ def build_review_batches(
     char_budget: int,
     max_lines: int | None,
 ) -> list[dict]:
-    """Build proof-aware review batches.
+    """Pack **whole files** into context-sized review passes.
 
-    Each batch dict:
-      ``diff`` (str), ``paths`` (list[str]), ``truncated`` (bool)
-    Every input file path appears in ≥1 batch (possibly hunk-split).
+    Each batch dict: ``diff``, ``paths``, ``truncated``.
+
+    Rules:
+    - Fill pass N with as many complete files as fit the char/line budget.
+    - If the next file does not fit the leftover space, it goes entirely into
+      pass N+1 (never half in N and half in N+1).
+    - If one file alone exceeds the full budget, it gets its own pass and may
+      be truncated (``truncated=True``) so the model still sees a prefix.
     """
     if not file_hunks:
         return []
     budget = max(1, char_budget)
     line_cap = max_lines if (max_lines is not None and max_lines > 0) else None
 
-    # Flatten to atomic units that each fit (or are marked truncated).
-    units: list[dict] = []
-    for file_diff in file_hunks:
-        path = path_from_file_diff(file_diff) or "(unknown)"
-        body = file_diff if file_diff.endswith("\n") else file_diff + "\n"
-        b_chars = len(body)
-        b_lines = int(diff_stats(body).get("total") or 0)
-        fits = b_chars <= budget and (line_cap is None or b_lines <= line_cap)
-        if fits:
-            units.append({"diff": body, "paths": [path], "truncated": False})
-            continue
-        for chunk, trunc in split_file_diff_by_hunk(
-            body, char_budget=budget, max_lines=line_cap
-        ):
-            units.append({"diff": chunk, "paths": [path], "truncated": trunc})
-
     batches: list[dict] = []
     cur_diffs: list[str] = []
     cur_paths: list[str] = []
     cur_chars = 0
     cur_lines = 0
-    cur_trunc = False
 
     def flush() -> None:
-        nonlocal cur_diffs, cur_paths, cur_chars, cur_lines, cur_trunc
+        nonlocal cur_diffs, cur_paths, cur_chars, cur_lines
         if not cur_diffs:
             return
         joined = "".join(cur_diffs)
         if not joined.endswith("\n"):
             joined += "\n"
-        # Preserve path order, unique.
-        seen: set[str] = set()
-        paths: list[str] = []
-        for p in cur_paths:
-            if p not in seen:
-                seen.add(p)
-                paths.append(p)
         batches.append(
-            {"diff": joined, "paths": paths, "truncated": cur_trunc}
+            {"diff": joined, "paths": list(cur_paths), "truncated": False}
         )
-        cur_diffs, cur_paths, cur_chars, cur_lines, cur_trunc = [], [], 0, 0, False
+        cur_diffs, cur_paths, cur_chars, cur_lines = [], [], 0, 0
 
-    for unit in units:
-        u_diff = unit["diff"]
-        u_chars = len(u_diff)
-        u_lines = int(diff_stats(u_diff).get("total") or 0)
-        # Truncated/oversized units always get their own batch.
-        if unit["truncated"] or u_chars > budget or (
-            line_cap is not None and u_lines > line_cap and not cur_diffs
-        ):
+    for file_diff in file_hunks:
+        path = path_from_file_diff(file_diff) or "(unknown)"
+        body = file_diff if file_diff.endswith("\n") else file_diff + "\n"
+        b_chars = len(body)
+        b_lines = int(diff_stats(body).get("total") or 0)
+        alone_too_big = b_chars > budget or (
+            line_cap is not None and b_lines > line_cap
+        )
+
+        if alone_too_big:
+            # Whole file cannot fit one pass → own pass (truncate chars only if needed).
             flush()
-            batches.append(
-                {
-                    "diff": u_diff if u_diff.endswith("\n") else u_diff + "\n",
-                    "paths": list(unit["paths"]),
-                    "truncated": bool(unit["truncated"]),
-                }
-            )
+            if b_chars > budget:
+                batches.append(
+                    {
+                        "diff": body[:budget],
+                        "paths": [path],
+                        "truncated": True,
+                    }
+                )
+            else:
+                # Over soft line_cap but under char budget: still one whole-file pass.
+                batches.append(
+                    {"diff": body, "paths": [path], "truncated": False}
+                )
             continue
+
         would_exceed = cur_diffs and (
-            cur_chars + u_chars > budget
-            or (line_cap is not None and cur_lines + u_lines > line_cap)
+            cur_chars + b_chars > budget
+            or (line_cap is not None and cur_lines + b_lines > line_cap)
         )
         if would_exceed:
             flush()
-        cur_diffs.append(u_diff if u_diff.endswith("\n") else u_diff + "\n")
-        cur_paths.extend(unit["paths"])
-        cur_chars += u_chars
-        cur_lines += u_lines
-        cur_trunc = cur_trunc or bool(unit["truncated"])
+        cur_diffs.append(body)
+        cur_paths.append(path)
+        cur_chars += b_chars
+        cur_lines += b_lines
     flush()
     return batches
 
@@ -1032,6 +1027,76 @@ def md_table_cell(text: str) -> str:
     return flat.replace("|", "\\|")
 
 
+def _findings_table_lines(findings: list[dict], *, empty_clean: bool) -> list[str]:
+    lines = [
+        "| Sev | Skill | Location | Finding |",
+        "|-----|-------|----------|---------|",
+    ]
+    if not findings:
+        lines.append(
+            "| — | — | — | No findings. |"
+            if empty_clean
+            else "| — | — | — | **Pass failed / incomplete** — treat as unreviewed. |"
+        )
+        return lines
+    for f in findings:
+        icon = SEV_ICON[f["severity"]]
+        cell = md_table_cell(f["finding"])
+        if f["suggested_fix"]:
+            cell += " *Suggested:* " + md_table_cell(f["suggested_fix"])
+        lines.append(
+            f"| {icon} {f['severity']} | {md_table_cell(f['skill'])} "
+            f"| {md_table_cell(f['location'])} | {cell} |"
+        )
+    return lines
+
+
+def format_pass_summary(
+    *,
+    pass_i: int,
+    pass_n: int,
+    paths: list[str],
+    findings: list[dict],
+    questions: list[str],
+    warnings: list[str] | None = None,
+    failed: bool = False,
+    error: str = "",
+) -> str:
+    """GitHub body for one automatic review pass (posted when that pass finishes)."""
+    counts = {k: 0 for k in SEV_RANK}
+    for f in findings:
+        counts[f["severity"]] += 1
+    count_bits = " · ".join(
+        f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit") if counts[s]
+    ) or "0 findings"
+    status = "FAILED" if failed else "done"
+    path_list = ", ".join(f"`{p}`" for p in paths[:20])
+    if len(paths) > 20:
+        path_list += f" … (+{len(paths) - 20} more)"
+    lines = [
+        f"## 🛡️ Neubodhi Review — Pass {pass_i} of {pass_n}",
+        "",
+        f"**Status:** {status}  ·  {count_bits}  ·  {len(paths)} file(s)",
+        "",
+        f"**Files in this pass:** {path_list or '(unknown)'}",
+        "",
+        "_Automatic multi-pass: next passes (if any) post separately when ready._",
+        "",
+    ]
+    for w in warnings or []:
+        lines += [f"> ⚠️ {w}", ""]
+    if failed and error:
+        lines += [f"> ❌ {error}", ""]
+    lines += ["### Findings"] + _findings_table_lines(
+        findings, empty_clean=not failed and not (warnings or [])
+    )
+    if questions:
+        lines += ["", "### Questions"]
+        for q in questions:
+            lines.append(f"- {q}")
+    return "\n".join(lines) + "\n"
+
+
 def format_summary(
     findings: list[dict],
     questions: list[str],
@@ -1041,45 +1106,34 @@ def format_summary(
     *,
     coverage_md: str = "",
     incomplete: bool = False,
+    pass_count: int = 0,
 ) -> str:
     counts = {k: 0 for k in SEV_RANK}
     for f in findings:
         counts[f["severity"]] += 1
     count_bits = " · ".join(f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit"))
     lines = [
-        "## 🛡️ Neubodhi Review",
+        "## 🛡️ Neubodhi Review — Final summary",
         "",
         f"**Verdict:** {verdict_label}  ·  {count_bits}",
         "",
         "_Backend: ollama_",
         "",
     ]
+    if pass_count > 1:
+        lines += [
+            f"_Detailed findings were posted per pass ({pass_count} automatic reviews above). "
+            "This comment is the overall verdict + coverage._",
+            "",
+        ]
     for w in warnings or []:
         lines += [f"> ⚠️ {w}", ""]
     if coverage_md:
         lines += [coverage_md.rstrip(), ""]
-    lines += [
-        "### Findings",
-        "| Sev | Skill | Location | Finding |",
-        "|-----|-------|----------|---------|",
-    ]
-    if not findings:
-        clean = not warnings and not incomplete
-        lines.append(
-            "| — | — | — | No findings. |"
-            if clean
-            else "| — | — | — | **Review incomplete** — treat this as unreviewed, not clean. |"
-        )
-    else:
-        for f in findings:
-            icon = SEV_ICON[f["severity"]]
-            cell = md_table_cell(f["finding"])
-            if f["suggested_fix"]:
-                cell += " *Suggested:* " + md_table_cell(f["suggested_fix"])
-            lines.append(
-                f"| {icon} {f['severity']} | {md_table_cell(f['skill'])} "
-                f"| {md_table_cell(f['location'])} | {cell} |"
-            )
+    # Keep a combined table so the gate/verdict is self-contained.
+    lines += ["### All findings (combined)"] + _findings_table_lines(
+        findings, empty_clean=not warnings and not incomplete
+    )
     if questions:
         lines += ["", "### Questions"]
         for q in questions:
@@ -1558,23 +1612,27 @@ Only review the diff provided (it may be one batch of a multi-batch PR review).
         chunk = batch["diff"]
         paths = list(batch.get("paths") or [])
         was_truncated = bool(batch.get("truncated"))
+        pass_warnings: list[str] = []
         if was_truncated:
             for p in paths:
                 if p not in truncated_paths:
                     truncated_paths.append(p)
-            warnings.append(
-                f"Batch {bi}/{len(batches)}: content for {', '.join(paths) or 'unknown'} "
-                f"exceeds context budget (~{budget} chars) even after hunk-splitting — "
-                "that slice was truncated; coverage incomplete."
+            note = (
+                f"Pass {bi}/{len(batches)}: file(s) {', '.join(paths) or 'unknown'} "
+                f"exceed the full context budget (~{budget} chars) alone — "
+                "sent a truncated prefix in this pass only (file was not split across passes)."
             )
+            warnings.append(note)
+            pass_warnings.append(note)
 
         batch_stats = diff_stats(chunk)
         batch_header = (
-            f"\n# Automatic multi-pass batch {bi} of {len(batches)}\n"
-            f"Files in this batch: {', '.join(paths) if paths else '(unknown)'}\n"
-            f"Changed lines in this batch: ~{batch_stats.get('total')}\n"
-            "Review only this batch's diff; remaining files are covered in other "
-            "automatic passes in this same run.\n"
+            f"\n# Automatic review pass {bi} of {len(batches)}\n"
+            f"Files in this pass (whole files only): "
+            f"{', '.join(paths) if paths else '(unknown)'}\n"
+            f"Changed lines in this pass: ~{batch_stats.get('total')}\n"
+            "Review only these files. Remaining files are reviewed in later "
+            "automatic passes after this one finishes.\n"
         )
 
         user = f"""# Review protocol
@@ -1634,12 +1692,36 @@ Description:
             if isinstance(val, (int, float)):
                 ollama_metrics[key] = int(ollama_metrics.get(key) or 0) + int(val)
         dropped += b_dropped
+
+        # Post this pass's results immediately so the PR shows Review 1, 2, 3…
+        try:
+            pass_body = format_pass_summary(
+                pass_i=bi,
+                pass_n=len(batches),
+                paths=paths,
+                findings=b_findings if not b_err else [],
+                questions=b_questions if not b_err else [],
+                warnings=pass_warnings,
+                failed=bool(b_err),
+                error=str(b_err or ""),
+            )
+            post_review(PR_NUMBER, "COMMENT", pass_body)
+            print(
+                f"neubodhi-ollama: posted pass {bi}/{len(batches)} COMMENT "
+                f"({0 if b_err else len(b_findings)} finding(s))",
+                flush=True,
+            )
+        except Exception as post_err:
+            print(
+                f"neubodhi-ollama: failed to post pass {bi} results: {post_err}",
+                file=sys.stderr,
+            )
+
         if b_err:
             batch_errors.append(f"pass {bi}/{len(batches)}: {b_err}")
             path_failures.update(paths)
             continue
         if was_truncated:
-            # Truncated slices are not proof of full file coverage.
             path_failures.update(paths)
         else:
             path_successes.update(paths)
@@ -1773,6 +1855,7 @@ Description:
         info_notes + warnings,
         coverage_md=coverage_md,
         incomplete=not coverage_complete,
+        pass_count=len(batches),
     )
     post_review(PR_NUMBER, event, summary)
     print(

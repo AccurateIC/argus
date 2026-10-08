@@ -65,8 +65,10 @@ limits:
   # Optional override: `@neubodhi first 40 files`.
   # Coverage is proof-checked: incomplete passes fail the Actions check.
   max_files: 0
-  # Soft cap on changed lines *per automatic pass* when packing files. Oversized
-  # single files are hunk-split across further passes when possible.
+  # Soft cap on changed lines *per automatic pass* when packing whole files.
+  # Files that do not fit the leftover space of a pass move entirely to the next
+  # pass (a file is never split across two reviews). Each pass posts its own
+  # GitHub review comment when it finishes.
   max_diff_lines: 8000
 
 # Claude model (used when backend: claude). Omit to inherit the action's default.
