@@ -7,6 +7,7 @@ Reuses prompts/, skills/, memory/, config/argus.yml. Posts a summary review with
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -17,6 +18,13 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# Hidden block on final PR reviews so the next run on the same PR can re-check
+# previous findings. GitHub does not render HTML comments in the review UI.
+FINDINGS_MARKER_START = "<!-- neubodhi-findings"
+FINDINGS_MARKER_END = "-->"
+# Cap how many prior findings we re-check / persist (keeps prompt + body small).
+MAX_FOLLOWUP_FINDINGS = 40
 
 # Argus log timestamps only (does not change system timezone).
 _IST = ZoneInfo("Asia/Kolkata")
@@ -656,6 +664,430 @@ def dedupe_findings(findings: list[dict]) -> list[dict]:
     return out
 
 
+def path_from_location(location: str) -> str:
+    """`api/foo.py:12` → `api/foo.py`; bare path unchanged."""
+    loc = (location or "").strip()
+    if not loc or loc == "—":
+        return ""
+    # Strip trailing :line or :line:col
+    m = re.match(r"^(.+?):(\d+)(?::\d+)?$", loc)
+    if m:
+        return m.group(1).strip()
+    return loc
+
+
+def finding_stable_id(path: str, finding_text: str) -> str:
+    raw = f"{path.strip().lower()}|{finding_text.strip().lower()[:200]}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
+
+def findings_to_ledger(findings: list[dict]) -> list[dict]:
+    """Compact list stored in the hidden review comment (same-PR memory)."""
+    ledger: list[dict] = []
+    for f in findings[:MAX_FOLLOWUP_FINDINGS]:
+        path = path_from_location(str(f.get("location") or ""))
+        text = str(f.get("finding") or "").strip()
+        if not text:
+            continue
+        line = None
+        loc = str(f.get("location") or "")
+        m = re.match(r"^.+?:(\d+)", loc)
+        if m:
+            try:
+                line = int(m.group(1))
+            except ValueError:
+                line = None
+        ledger.append(
+            {
+                "id": finding_stable_id(path, text),
+                "severity": str(f.get("severity") or "nit"),
+                "skill": str(f.get("skill") or "correctness"),
+                "path": path,
+                "line": line,
+                "location": loc or (path or "—"),
+                "finding": text[:500],
+            }
+        )
+    return ledger
+
+
+def serialize_findings_marker(ledger: list[dict]) -> str:
+    payload = json.dumps(ledger, ensure_ascii=False, separators=(",", ":"))
+    return f"{FINDINGS_MARKER_START}\n{payload}\n{FINDINGS_MARKER_END}"
+
+
+def parse_findings_marker(body: str) -> list[dict] | None:
+    """Extract ledger from a review body, or None if absent/invalid."""
+    if not body or FINDINGS_MARKER_START not in body:
+        return None
+    start = body.find(FINDINGS_MARKER_START)
+    if start < 0:
+        return None
+    start = body.find("\n", start)
+    if start < 0:
+        return None
+    start += 1
+    end = body.find(FINDINGS_MARKER_END, start)
+    if end < 0:
+        return None
+    raw = body[start:end].strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, list):
+        return None
+    out: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("finding") or "").strip()
+        if not text:
+            continue
+        path = str(item.get("path") or path_from_location(str(item.get("location") or "")))
+        loc = str(item.get("location") or (f"{path}:{item['line']}" if item.get("line") else path or "—"))
+        out.append(
+            {
+                "id": str(item.get("id") or finding_stable_id(path, text)),
+                "severity": str(item.get("severity") or "nit"),
+                "skill": str(item.get("skill") or "correctness"),
+                "path": path,
+                "line": item.get("line"),
+                "location": loc,
+                "finding": text,
+            }
+        )
+    return out
+
+
+def load_previous_findings(pr: str) -> list[dict]:
+    """Latest Neubodhi final-summary ledger on this PR (via gh api). Empty if none."""
+    repo = os.environ.get("GH_REPO") or os.environ.get("GITHUB_REPOSITORY") or ""
+    if not repo or not pr:
+        return []
+    r = subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{pr}/reviews", "--paginate"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return []
+    try:
+        items = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(items, list):
+        return []
+    # Newest first — prefer the most recent review that carries our marker.
+    for rev in reversed(items):
+        if not isinstance(rev, dict):
+            continue
+        body = str(rev.get("body") or "")
+        if FINDINGS_MARKER_START not in body:
+            continue
+        parsed = parse_findings_marker(body)
+        if parsed is not None:
+            print(
+                f"neubodhi-ollama: loaded {len(parsed)} previous finding(s) from prior review",
+                flush=True,
+            )
+            return parsed[:MAX_FOLLOWUP_FINDINGS]
+    return []
+
+
+def diff_paths_map(diff: str) -> dict[str, str]:
+    """Map file path → file hunk text for the given unified diff."""
+    out: dict[str, str] = {}
+    for hunk in split_diff_by_file(diff):
+        path = path_from_file_diff(hunk)
+        if path:
+            out[path] = hunk if hunk.endswith("\n") else hunk + "\n"
+    return out
+
+
+def ledger_item_as_finding(item: dict) -> dict:
+    return {
+        "severity": str(item.get("severity") or "nit"),
+        "skill": str(item.get("skill") or "correctness"),
+        "location": str(item.get("location") or item.get("path") or "—"),
+        "finding": str(item.get("finding") or ""),
+        "suggested_fix": "",
+    }
+
+
+def findings_roughly_match(a_path: str, a_text: str, b: dict) -> bool:
+    """Same file + overlapping topic — used to avoid double-listing still-open vs new."""
+    b_path = path_from_location(str(b.get("location") or ""))
+    if a_path and b_path and a_path != b_path:
+        return False
+    if a_path and b_path and a_path == b_path:
+        a_tok = set(re.findall(r"[a-z0-9_]{4,}", (a_text or "").lower()))
+        b_tok = set(re.findall(r"[a-z0-9_]{4,}", str(b.get("finding") or "").lower()))
+        if not a_tok or not b_tok:
+            return (a_text or "").strip().lower()[:80] == str(b.get("finding") or "").strip().lower()[:80]
+        return len(a_tok & b_tok) >= 2
+    return False
+
+
+def subtract_matching_findings(
+    current: list[dict], still_open: list[dict]
+) -> list[dict]:
+    """Drop current findings that already appear as still-open follow-ups."""
+    if not still_open:
+        return current
+    out: list[dict] = []
+    for f in current:
+        if any(
+            findings_roughly_match(
+                str(s.get("path") or path_from_location(str(s.get("location") or ""))),
+                str(s.get("finding") or ""),
+                f,
+            )
+            for s in still_open
+        ):
+            continue
+        out.append(f)
+    return out
+
+
+def heuristic_finding_status(item: dict, file_hunk: str, current_findings: list[dict]) -> str:
+    """Best-effort resolved/still_open without a model call (file must be covered)."""
+    path = str(item.get("path") or "")
+    text = str(item.get("finding") or "")
+    if any(findings_roughly_match(path, text, f) for f in current_findings):
+        return "still_open"
+    # Distinctive tokens from the finding still present on added lines → likely open.
+    tokens = [t for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{4,}", text) if t.lower() not in {
+        "should", "would", "could", "there", "their", "where", "which", "using",
+        "after", "before", "without", "missing", "check", "error", "value",
+    }]
+    added = "\n".join(
+        ln[1:] for ln in file_hunk.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    )
+    added_l = added.lower()
+    hits = sum(1 for t in tokens[:12] if t.lower() in added_l)
+    if hits >= 2:
+        return "still_open"
+    return "resolved"
+
+
+def recheck_findings_with_ollama(
+    host: str,
+    model: str,
+    items: list[dict],
+    files_diff: str,
+) -> dict[str, str] | None:
+    """Ask the model whether each prior finding is still present. None on failure."""
+    if not items or not files_diff.strip():
+        return {}
+    catalog = [
+        {"id": it["id"], "path": it.get("path") or "", "finding": it.get("finding") or ""}
+        for it in items
+    ]
+    system = (
+        "You re-check previous code-review findings against the current PR diff. "
+        "Return ONLY JSON. status=still_open if the same problem is still visible "
+        "in the diff; status=resolved if the issue was fixed or removed. "
+        "Do not invent new findings."
+    )
+    user = (
+        "Previous findings to re-check:\n"
+        f"{json.dumps(catalog, ensure_ascii=False)}\n\n"
+        "Current diff for those files only:\n```diff\n"
+        f"{files_diff[:120_000]}\n```\n\n"
+        'Return JSON: {"results":[{"id":"...","status":"resolved"|"still_open"}]}'
+    )
+    recheck_schema = {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "status"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["resolved", "still_open"],
+                        },
+                    },
+                },
+            }
+        },
+    }
+    try:
+        # ollama_chat is defined later; only invoked at runtime from main().
+        raw_text, _metrics = ollama_chat(
+            host,
+            model,
+            system,
+            user,
+            num_predict=min(NUM_PREDICT, 2048),
+            format_schema=recheck_schema,
+        )
+        raw = extract_json(raw_text)
+    except Exception as e:
+        print(f"neubodhi-ollama: follow-up recheck failed: {e}", file=sys.stderr)
+        return None
+    results = raw.get("results") if isinstance(raw, dict) else None
+    if not isinstance(results, list):
+        return None
+    out: dict[str, str] = {}
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        fid = str(row.get("id") or "")
+        status = str(row.get("status") or "").lower().strip()
+        if fid and status in ("resolved", "still_open"):
+            out[fid] = status
+    return out
+
+
+def classify_previous_findings(
+    previous: list[dict],
+    *,
+    full_diff: str,
+    covered_paths: set[str],
+    comments_blob: str,
+    current_findings: list[dict],
+    host: str = "",
+    model: str = "",
+    use_model_recheck: bool = True,
+) -> dict[str, list[dict]]:
+    """Split prior findings into resolved / still_open / not_rechecked / waived."""
+    buckets: dict[str, list[dict]] = {
+        "resolved": [],
+        "still_open": [],
+        "not_rechecked": [],
+        "waived": [],
+    }
+    if not previous:
+        return buckets
+
+    path_map = diff_paths_map(full_diff)
+    waivers = extract_author_waivers(comments_blob)
+    needs_recheck: list[dict] = []
+
+    for item in previous:
+        finding = ledger_item_as_finding(item)
+        if waivers and finding_waived_by_author(finding, waivers):
+            buckets["waived"].append(item)
+            continue
+        path = str(item.get("path") or path_from_location(str(item.get("location") or "")))
+        if not path:
+            buckets["not_rechecked"].append(item)
+            continue
+        if path not in path_map:
+            # File no longer appears in the PR diff → treated as fixed/reverted.
+            buckets["resolved"].append(item)
+            continue
+        if path not in covered_paths:
+            buckets["not_rechecked"].append(item)
+            continue
+        needs_recheck.append(item)
+
+    status_by_id: dict[str, str] = {}
+    if needs_recheck:
+        skip_model = os.environ.get("ARGUS_SKIP_FOLLOWUP_RECHECK", "").strip() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if use_model_recheck and not skip_model and host and model:
+            hunks = []
+            seen_p: set[str] = set()
+            for it in needs_recheck:
+                p = str(it.get("path") or "")
+                if p and p not in seen_p and p in path_map:
+                    hunks.append(path_map[p])
+                    seen_p.add(p)
+            model_out = recheck_findings_with_ollama(host, model, needs_recheck, "".join(hunks))
+            if model_out is None:
+                # Never invent "resolved" when the recheck failed.
+                for it in needs_recheck:
+                    buckets["not_rechecked"].append(it)
+                needs_recheck = []
+            else:
+                status_by_id = model_out
+        if needs_recheck:
+            for it in needs_recheck:
+                fid = str(it.get("id") or "")
+                st = status_by_id.get(fid)
+                if st not in ("resolved", "still_open"):
+                    st = heuristic_finding_status(
+                        it, path_map.get(str(it.get("path") or ""), ""), current_findings
+                    )
+                buckets[st].append(it)
+
+    return buckets
+
+
+def format_followup_sections(followup: dict[str, list[dict]]) -> list[str]:
+    """Markdown sections for resolved / still open / not rechecked / new."""
+    resolved = followup.get("resolved") or []
+    still_open = followup.get("still_open") or []
+    not_rechecked = followup.get("not_rechecked") or []
+    waived = followup.get("waived") or []
+    new = followup.get("new") or []
+    if not any((resolved, still_open, not_rechecked, waived, new)):
+        return []
+
+    lines = [
+        f"**Follow-up:** {len(resolved)} resolved · {len(still_open)} still open · "
+        f"{len(new)} new"
+        + (f" · {len(not_rechecked)} not rechecked" if not_rechecked else "")
+        + (f" · {len(waived)} waived" if waived else ""),
+        "",
+    ]
+
+    def _simple_table(items: list[dict], *, with_skill: bool) -> list[str]:
+        if with_skill:
+            rows = [
+                "| Sev | Skill | Location | Finding |",
+                "|-----|-------|----------|---------|",
+            ]
+            for f in items:
+                icon = SEV_ICON.get(str(f.get("severity") or "nit"), "⚪")
+                rows.append(
+                    f"| {icon} {md_table_cell(f.get('severity') or 'nit')} | "
+                    f"{md_table_cell(f.get('skill') or '—')} | "
+                    f"{md_table_cell(f.get('location') or f.get('path') or '—')} | "
+                    f"{md_table_cell(f.get('finding') or '')} |"
+                )
+            return rows
+        rows = [
+            "| Sev | Location | Finding |",
+            "|-----|----------|---------|",
+        ]
+        for f in items:
+            icon = SEV_ICON.get(str(f.get("severity") or "nit"), "⚪")
+            rows.append(
+                f"| {icon} {md_table_cell(f.get('severity') or 'nit')} | "
+                f"{md_table_cell(f.get('location') or f.get('path') or '—')} | "
+                f"{md_table_cell(f.get('finding') or '')} |"
+            )
+        return rows
+
+    if resolved:
+        lines += ["### ✅ Resolved since last review"] + _simple_table(resolved, with_skill=False) + [""]
+    if still_open:
+        lines += ["### 🔴 Still open"] + _simple_table(still_open, with_skill=False) + [""]
+    if not_rechecked:
+        lines += [
+            "### ⏸️ Not rechecked",
+            "_These files were outside this run’s covered window — not treated as fixed._",
+            "",
+        ] + _simple_table(not_rechecked, with_skill=False) + [""]
+    if waived:
+        lines += ["### ⏭️ Waived by author"] + _simple_table(waived, with_skill=False) + [""]
+    if new:
+        lines += ["### 🆕 New findings"] + _simple_table(new, with_skill=True) + [""]
+    return lines
+
+
 def format_coverage_section(
     *,
     total_files: int,
@@ -717,6 +1149,7 @@ def ollama_chat(
     user: str,
     *,
     num_predict: int | None = None,
+    format_schema: dict | None = None,
 ) -> tuple[str, dict]:
     """Stream from Ollama so long prefill/generation doesn't hit a single read timeout.
 
@@ -734,7 +1167,7 @@ def ollama_chat(
         "model": model,
         "stream": True,
         # Full schema (not bare "json") — constrained decoding to the findings shape.
-        "format": FINDINGS_JSON_SCHEMA,
+        "format": FINDINGS_JSON_SCHEMA if format_schema is None else format_schema,
         # qwen3.6 streams into message.thinking by default; that burns the
         # budget with 0 content chars. Force answer tokens into content.
         "think": False,
@@ -1040,13 +1473,15 @@ def _findings_table_lines(findings: list[dict], *, empty_clean: bool) -> list[st
         )
         return lines
     for f in findings:
-        icon = SEV_ICON[f["severity"]]
-        cell = md_table_cell(f["finding"])
-        if f["suggested_fix"]:
-            cell += " *Suggested:* " + md_table_cell(f["suggested_fix"])
+        sev = str(f.get("severity") or "nit")
+        icon = SEV_ICON.get(sev, "⚪")
+        cell = md_table_cell(f.get("finding") or "")
+        fix = str(f.get("suggested_fix") or "")
+        if fix:
+            cell += " *Suggested:* " + md_table_cell(fix)
         lines.append(
-            f"| {icon} {f['severity']} | {md_table_cell(f['skill'])} "
-            f"| {md_table_cell(f['location'])} | {cell} |"
+            f"| {icon} {sev} | {md_table_cell(f.get('skill') or '—')} "
+            f"| {md_table_cell(f.get('location') or '—')} | {cell} |"
         )
     return lines
 
@@ -1107,13 +1542,15 @@ def format_summary(
     coverage_md: str = "",
     incomplete: bool = False,
     pass_count: int = 0,
+    followup: dict[str, list[dict]] | None = None,
+    persist_findings: list[dict] | None = None,
 ) -> str:
     counts = {k: 0 for k in SEV_RANK}
     for f in findings:
         counts[f["severity"]] += 1
     count_bits = " · ".join(f"{counts[s]} {s}" for s in ("blocker", "major", "minor", "nit"))
     lines = [
-        "## 🛡️ Neubodhi Review — Final summary",
+        "## 🛡️ Neubodhi Review",
         "",
         f"**Verdict:** {verdict_label}  ·  {count_bits}",
         "",
@@ -1122,16 +1559,23 @@ def format_summary(
     ]
     if pass_count > 1:
         lines += [
-            f"_Detailed findings were posted per pass ({pass_count} automatic reviews above). "
-            "This comment is the overall verdict + coverage._",
+            f"_Combined from {pass_count} automatic review passes (one PR comment)._ ",
             "",
         ]
     for w in warnings or []:
         lines += [f"> ⚠️ {w}", ""]
+    if followup:
+        lines += format_followup_sections(followup)
     if coverage_md:
         lines += [coverage_md.rstrip(), ""]
     # Keep a combined table so the gate/verdict is self-contained.
-    lines += ["### All findings (combined)"] + _findings_table_lines(
+    # When follow-up sections exist, this table is open items only (still open + new).
+    heading = (
+        "### Open findings (still open + new)"
+        if followup
+        else "### All findings (combined)"
+    )
+    lines += [heading] + _findings_table_lines(
         findings, empty_clean=not warnings and not incomplete
     )
     if questions:
@@ -1142,7 +1586,11 @@ def format_summary(
         lines += ["", "### 📝 Memory suggestion"]
         for m in memory:
             lines.append(f"- {m}")
-    return "\n".join(lines) + "\n"
+    body = "\n".join(lines) + "\n"
+    # Only persist a ledger on complete reviews so incomplete runs never look "fixed".
+    if persist_findings is not None and not incomplete:
+        body += "\n" + serialize_findings_marker(findings_to_ledger(persist_findings)) + "\n"
+    return body
 
 
 def _fmt_token_metric(value: int | None) -> str:
@@ -1457,7 +1905,8 @@ def main() -> None:
         die(f"$ gh pr diff {PR_NUMBER}\n{err}")
 
     raw_diff = diff_r.stdout
-    diff = filter_diff(raw_diff, skip)
+    full_filtered_diff = filter_diff(raw_diff, skip)
+    diff = full_filtered_diff
     warnings: list[str] = []
     diff, kept_files, total_files = take_first_n_files(diff, max_files)
     if total_files > kept_files:
@@ -1612,18 +2061,15 @@ Only review the diff provided (it may be one batch of a multi-batch PR review).
         chunk = batch["diff"]
         paths = list(batch.get("paths") or [])
         was_truncated = bool(batch.get("truncated"))
-        pass_warnings: list[str] = []
         if was_truncated:
             for p in paths:
                 if p not in truncated_paths:
                     truncated_paths.append(p)
-            note = (
+            warnings.append(
                 f"Pass {bi}/{len(batches)}: file(s) {', '.join(paths) or 'unknown'} "
                 f"exceed the full context budget (~{budget} chars) alone — "
                 "sent a truncated prefix in this pass only (file was not split across passes)."
             )
-            warnings.append(note)
-            pass_warnings.append(note)
 
         batch_stats = diff_stats(chunk)
         batch_header = (
@@ -1693,29 +2139,13 @@ Description:
                 ollama_metrics[key] = int(ollama_metrics.get(key) or 0) + int(val)
         dropped += b_dropped
 
-        # Post this pass's results immediately so the PR shows Review 1, 2, 3…
-        try:
-            pass_body = format_pass_summary(
-                pass_i=bi,
-                pass_n=len(batches),
-                paths=paths,
-                findings=b_findings if not b_err else [],
-                questions=b_questions if not b_err else [],
-                warnings=pass_warnings,
-                failed=bool(b_err),
-                error=str(b_err or ""),
-            )
-            post_review(PR_NUMBER, "COMMENT", pass_body)
-            print(
-                f"neubodhi-ollama: posted pass {bi}/{len(batches)} COMMENT "
-                f"({0 if b_err else len(b_findings)} finding(s))",
-                flush=True,
-            )
-        except Exception as post_err:
-            print(
-                f"neubodhi-ollama: failed to post pass {bi} results: {post_err}",
-                file=sys.stderr,
-            )
+        # Multi-pass runs stay internal — only one final summary is posted to the PR.
+        print(
+            f"neubodhi-ollama: pass {bi}/{len(batches)} finished "
+            f"({0 if b_err else len(b_findings)} finding(s)"
+            f"{'; failed' if b_err else ''}) — not posted (final summary only)",
+            flush=True,
+        )
 
         if b_err:
             batch_errors.append(f"pass {bi}/{len(batches)}: {b_err}")
@@ -1834,6 +2264,46 @@ Description:
             file=sys.stderr,
         )
 
+    # Same-PR follow-up: load last ledger, classify old items, then verdict on open ones.
+    previous_findings = load_previous_findings(PR_NUMBER)
+    followup_view: dict[str, list[dict]] | None = None
+    persist_for_next: list[dict] | None = findings
+    if previous_findings:
+        buckets = classify_previous_findings(
+            previous_findings,
+            full_diff=full_filtered_diff,
+            covered_paths=covered_paths,
+            comments_blob=comments_blob,
+            current_findings=findings,
+            host=host,
+            model=model,
+            use_model_recheck=True,
+        )
+        new_findings = subtract_matching_findings(findings, buckets["still_open"])
+        still_open_as = [ledger_item_as_finding(x) for x in buckets["still_open"]]
+        # Verdict / open table: still-open prior items + genuinely new ones.
+        findings = still_open_as + new_findings
+        findings.sort(key=lambda x: SEV_RANK.get(x.get("severity") or "nit", 99))
+        followup_view = {
+            "resolved": buckets["resolved"],
+            "still_open": buckets["still_open"],
+            "not_rechecked": buckets["not_rechecked"],
+            "waived": buckets["waived"],
+            "new": new_findings,
+        }
+        # Next run should only track items that are still open (plus new). Never
+        # persist when coverage is incomplete — handled inside format_summary.
+        persist_for_next = findings
+        print(
+            "neubodhi-ollama: follow-up "
+            f"resolved={len(buckets['resolved'])} "
+            f"still_open={len(buckets['still_open'])} "
+            f"new={len(new_findings)} "
+            f"not_rechecked={len(buckets['not_rechecked'])} "
+            f"waived={len(buckets['waived'])}",
+            flush=True,
+        )
+
     for key in ("input_tokens", "output_tokens", "duration_s"):
         if ollama_metrics.get(key) == 0 and not findings and batch_errors:
             ollama_metrics[key] = None
@@ -1847,6 +2317,8 @@ Description:
         event, label = "COMMENT", "COMMENT"
     if warnings and event == "APPROVE":
         event, label = "COMMENT", "COMMENT"
+    # Incomplete reviews must not rewrite the ledger (avoid false "resolved" later).
+    persist_arg = persist_for_next if coverage_complete else None
     summary = format_summary(
         findings,
         questions,
@@ -1856,6 +2328,8 @@ Description:
         coverage_md=coverage_md,
         incomplete=not coverage_complete,
         pass_count=len(batches),
+        followup=followup_view,
+        persist_findings=persist_arg,
     )
     post_review(PR_NUMBER, event, summary)
     print(
