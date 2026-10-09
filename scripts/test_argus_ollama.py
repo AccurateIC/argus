@@ -12,11 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from argus_ollama import (  # noqa: E402
     FINDINGS_JSON_SCHEMA,
     build_review_batches,
+    classify_previous_findings,
     dedupe_findings,
     diff_char_budget,
     diff_stats,
     extract_json,
     filter_diff,
+    findings_to_ledger,
     format_coverage_section,
     format_diff_too_large,
     format_findings_metric,
@@ -28,11 +30,15 @@ from argus_ollama import (  # noqa: E402
     md_table_cell,
     normalize_findings,
     pack_file_batches,
+    parse_findings_marker,
     parse_max_files,
     path_from_file_diff,
+    path_from_location,
     print_argus_review_summary,
     salvage_findings_json,
+    serialize_findings_marker,
     split_diff_by_file,
+    subtract_matching_findings,
     take_first_n_files,
 )
 
@@ -339,5 +345,140 @@ print_argus_review_summary(
     findings=[],
     status="incomplete",
 )
+
+# Same-PR follow-up ledger: serialize ↔ parse round-trip.
+assert path_from_location("api/invites.py:212") == "api/invites.py"
+assert path_from_location("README.md") == "README.md"
+_ledger_src = [
+    {
+        "severity": "major",
+        "skill": "security",
+        "location": "api/invites.py:212",
+        "finding": "Invite lookup not scoped to the caller's org",
+        "suggested_fix": "filter by org_id",
+    }
+]
+_marker = serialize_findings_marker(findings_to_ledger(_ledger_src))
+assert "<!-- neubodhi-findings" in _marker
+_parsed = parse_findings_marker("## review\n\n" + _marker + "\n")
+assert _parsed is not None and len(_parsed) == 1
+assert _parsed[0]["path"] == "api/invites.py"
+assert "scoped" in _parsed[0]["finding"]
+
+# Hidden marker is appended only when persist_findings is set and review is complete.
+_with_persist = format_summary(
+    _ledger_src, [], [], "COMMENT", persist_findings=_ledger_src, incomplete=False
+)
+assert "<!-- neubodhi-findings" in _with_persist
+_no_persist_incomplete = format_summary(
+    _ledger_src, [], [], "COMMENT", persist_findings=_ledger_src, incomplete=True
+)
+assert "<!-- neubodhi-findings" not in _no_persist_incomplete
+
+# Classify: file gone from PR diff → resolved; uncovered path → not_rechecked.
+_prev = findings_to_ledger(
+    [
+        {
+            "severity": "major",
+            "skill": "security",
+            "location": "gone.py:1",
+            "finding": "old bug in gone file",
+            "suggested_fix": "",
+        },
+        {
+            "severity": "major",
+            "skill": "security",
+            "location": "skip_me.py:2",
+            "finding": "other bug still maybe",
+            "suggested_fix": "",
+        },
+    ]
+)
+_full = (
+    "diff --git a/skip_me.py b/skip_me.py\n--- a/skip_me.py\n+++ b/skip_me.py\n"
+    "@@ -1 +1 @@\n-old\n+new\n"
+)
+_buckets = classify_previous_findings(
+    _prev,
+    full_diff=_full,
+    covered_paths=set(),  # skip_me not covered this run
+    comments_blob="",
+    current_findings=[],
+    use_model_recheck=False,
+)
+assert len(_buckets["resolved"]) == 1 and _buckets["resolved"][0]["path"] == "gone.py"
+assert len(_buckets["not_rechecked"]) == 1 and _buckets["not_rechecked"][0]["path"] == "skip_me.py"
+
+# Covered + matching current finding → still_open via heuristic.
+_prev2 = findings_to_ledger(
+    [
+        {
+            "severity": "major",
+            "skill": "correctness",
+            "location": "a.py:1",
+            "finding": "Balance update is not atomic",
+            "suggested_fix": "",
+        }
+    ]
+)
+_full2 = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+Balance update race\n"
+_buckets2 = classify_previous_findings(
+    _prev2,
+    full_diff=_full2,
+    covered_paths={"a.py"},
+    comments_blob="",
+    current_findings=[
+        {
+            "severity": "major",
+            "skill": "correctness",
+            "location": "a.py:3",
+            "finding": "Balance update is not atomic under concurrency",
+            "suggested_fix": "",
+        }
+    ],
+    use_model_recheck=False,
+)
+assert len(_buckets2["still_open"]) == 1, _buckets2
+
+# New findings omit ones already listed as still open.
+_new_only = subtract_matching_findings(
+    [
+        {
+            "severity": "major",
+            "skill": "correctness",
+            "location": "a.py:3",
+            "finding": "Balance update is not atomic under concurrency",
+            "suggested_fix": "",
+        },
+        {
+            "severity": "minor",
+            "skill": "tests",
+            "location": "b.py:1",
+            "finding": "missing test for expiry",
+            "suggested_fix": "",
+        },
+    ],
+    _buckets2["still_open"],
+)
+assert len(_new_only) == 1 and "expiry" in _new_only[0]["finding"]
+
+_follow_body = format_summary(
+    _new_only,
+    [],
+    [],
+    "COMMENT",
+    followup={
+        "resolved": _buckets["resolved"],
+        "still_open": _buckets2["still_open"],
+        "not_rechecked": [],
+        "waived": [],
+        "new": _new_only,
+    },
+    persist_findings=_new_only,
+)
+assert "Resolved since last review" in _follow_body
+assert "Still open" in _follow_body
+assert "New findings" in _follow_body
+assert "Open findings (still open + new)" in _follow_body
 
 print("ok")
