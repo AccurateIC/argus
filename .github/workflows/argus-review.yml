@@ -117,7 +117,7 @@ jobs:
           ARGUS_BATCH_RETRIES: "1"
           # Context window for Ollama (tokens). Override via env if needed.
           OLLAMA_NUM_CTX: "65536"
-          OLLAMA_NUM_PREDICT: "8192"
+          OLLAMA_NUM_PREDICT: "4096"
         # Mirror step stdout/stderr into journald so `journalctl -t argus` works on
         # the self-hosted runner (runner service logs alone only show job name).
         shell: bash
