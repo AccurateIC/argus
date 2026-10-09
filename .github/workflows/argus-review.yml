@@ -21,11 +21,18 @@ on:
         description: Path to argus.yml
         type: string
         default: config/argus.yml
+      pr-number:                      # NEW
+        type: string
+        default: ""
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
   workflow_dispatch:
+    inputs:                           # NEW
+        pr-number:
+          description: PR number
+          required: true
 
 permissions:
   contents: read
@@ -33,7 +40,8 @@ permissions:
   issues: read
 
 concurrency:
-  group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
+  # group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: argus-${{ github.repository }}-${{ inputs.pr-number || github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
