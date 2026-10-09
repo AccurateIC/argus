@@ -90,7 +90,7 @@ jobs:
     needs: resolve
     # Runner journalctl only prints this name ("Running job: …"), not step stdout.
     # Must be quoted: an unquoted `#` is a YAML comment and drops PR + actor.
-    name: "${{ github.repository }} #${{ github.event.pull_request.number || github.event.issue.number }} @${{ github.actor }}"
+    name: "${{ github.repository }} #${{ inputs.pr-number || github.event.pull_request.number || github.event.issue.number }} @${{ github.actor }}"
     runs-on: ${{ needs.resolve.outputs.backend == 'ollama' && 'self-hosted' || 'ubuntu-latest' }}
     # Large PRs run many sequential Ollama passes in one job; allow hours, not minutes.
     timeout-minutes: 360
@@ -112,7 +112,7 @@ jobs:
       - name: Run Argus (Ollama)
         if: needs.resolve.outputs.backend == 'ollama'
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number || github.event.issue.number }}
           PR_COMMENT: ${{ github.event.comment.body }}
           ARGUS_CONFIG: ${{ needs.resolve.outputs.config_path }}
           GH_TOKEN: ${{ github.token }}
