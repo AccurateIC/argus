@@ -1949,9 +1949,9 @@ Return ONLY valid JSON (no markdown fences) with this schema:
       "severity": "blocker|major|minor|nit",
       "skill": "<skill name>",
       "location": "path:line or —",
-      "finding": "what's wrong (short)",
-      "impact": "why it matters (short)",
-      "suggested_fix": "optional short fix"
+      "finding": "what's wrong — plain English, one short sentence",
+      "impact": "what can go wrong for users/system — plain English, one short sentence",
+      "suggested_fix": "what to do — short and concrete"
     }}
   ],
   "questions": ["optional unsure items"],
@@ -1959,6 +1959,8 @@ Return ONLY valid JSON (no markdown fences) with this schema:
 }}
 Precision over volume. Do not re-flag accepted-patterns. Cite path:line.
 Keep finding / impact / suggested_fix as separate short fields (not combined).
+Write simply: everyday words, almost no jargon or unexplained acronyms.
+No long technical essays — each field one short sentence (about 15 words max).
 Severity gate in config is `{gate}`.
 Only review the diff provided (it may be one batch of a multi-batch PR review).
 """
