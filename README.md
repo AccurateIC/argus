@@ -129,13 +129,13 @@ The full data-flow and extension points are in [`docs/architecture.md`](docs/arc
 **Verdict:** REQUEST CHANGES  ·  1 blocker · 1 major · 2 minor · 1 nit
 
 ### Findings
-| Sev | Skill | Location | Finding |
-|-----|-------|----------|---------|
-| 🔴 blocker | security | api/invites/views.py:212 | `Invite.objects.get(pk=…)` isn't scoped to the caller's org → any user can accept another org's invite by id (IDOR). Scope by `request.user`'s org. |
-| 🟠 major | concurrency | billing/credits.py:88 | `c = get(); c.balance -= n; c.save()` is a non-atomic read-modify-write — two concurrent spends lose an update. Use `select_for_update()` or an atomic `F()` decrement. |
-| 🟡 minor | tests | — | The new `expired` branch in `accept()` has no test; add one that would fail without the guard. |
-| 🟡 minor | observability | tasks/webhook.py:41 | `except Exception: pass` swallows delivery failures silently — log with the event id. |
-| ⚪ nit | correctness | serializers.py:19 | Redundant `list()` around a comprehension. |
+| Severity | File:Line | Finding | Impact | Suggested Fix |
+|----------|-----------|---------|--------|---------------|
+| 🔴 Blocker | api/invites/views.py:212 | `Invite.objects.get(pk=…)` isn't scoped to the caller's org | Any user can accept another org's invite by id (IDOR) | Scope by `request.user`'s org |
+| 🟠 Major | billing/credits.py:88 | Non-atomic read-modify-write on balance | Two concurrent spends lose an update | Use `select_for_update()` or atomic `F()` decrement |
+| 🟡 Minor | — | New `expired` branch in `accept()` has no test | Regressions can land unnoticed | Add a test that fails without the guard |
+| 🟡 Minor | tasks/webhook.py:41 | `except Exception: pass` swallows delivery failures | Silent lost webhooks | Log with the event id |
+| ⚪ Nit | serializers.py:19 | Redundant `list()` around a comprehension | Noise / slight cost | Drop the outer `list()` |
 
 ### Questions
 - `serializers.py:33` adds `email` to `PublicUserSerializer` — is this serializer used on any unauthenticated endpoint? If so it's a data-protection blocker.

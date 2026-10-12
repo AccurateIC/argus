@@ -155,16 +155,20 @@ broken_finding = {
     "skill": "correctness",
     "location": "frontend/src/App.tsx:315",
     "finding": "SSE parser splits on '\\n'\nand skips empty lines.",
+    "impact": "Missed events under load",
     "suggested_fix": "use a state\nmachine | library",
 }
 table_body = format_summary([broken_finding], [], [], "REQUEST CHANGES")
+assert "| Severity | File:Line | Finding | Impact | Suggested Fix |" in table_body
 finding_rows = [
     ln for ln in table_body.splitlines() if ln.startswith("| 🟠") or ln.startswith("| 🟡") or ln.startswith("| ⚪") or ln.startswith("| 🔴")
 ]
 assert len(finding_rows) == 1, finding_rows
+assert "| 🟠 Major |" in finding_rows[0]
 assert "\\n" in finding_rows[0] or "splits on" in finding_rows[0]
 assert "\\| library" in finding_rows[0]
-assert finding_rows[0].count("|") >= 5  # leading + 4 cols + trailing
+assert "Missed events under load" in finding_rows[0]
+assert finding_rows[0].count("|") >= 6  # leading + 5 cols + trailing
 
 # P1: schema must require findings + severity enum.
 assert FINDINGS_JSON_SCHEMA["required"] == ["findings"]

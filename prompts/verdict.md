@@ -18,11 +18,11 @@ Post one summary with this shape:
 **Verdict:** <REQUEST CHANGES | COMMENT | APPROVE>  ·  <n blocker · n major · n minor · n nit>
 
 ### Findings
-| Sev | Skill | Location | Finding |
-|-----|-------|----------|---------|
-| 🔴 blocker | security | api/views.py:212 | Missing tenant scope → IDOR |
-| 🟠 major   | correctness | tasks.py:88 | Non-atomic read-modify-write |
-| 🟡 minor   | tests | — | New branch in `accept()` is untested |
+| Severity | File:Line | Finding | Impact | Suggested Fix |
+|----------|-----------|---------|--------|---------------|
+| 🔴 Blocker | api/views.py:212 | Missing tenant scope | IDOR across tenants | Scope query to caller's org |
+| 🟠 Major | tasks.py:88 | Non-atomic read-modify-write | Lost updates under concurrency | Use select_for_update or F() |
+| 🟡 Minor | — | New branch in `accept()` is untested | Regressions can land unnoticed | Add a failing-first test |
 
 ### Questions
 - <things you weren't sure enough to call findings>
@@ -31,7 +31,7 @@ Post one summary with this shape:
 - <a convention/accepted-pattern worth recording, for a human to merge>
 ```
 
-Severity icons: 🔴 blocker · 🟠 major · 🟡 minor · ⚪ nit.
+Severity icons: 🔴 Blocker · 🟠 Major · 🟡 Minor · ⚪ Nit.
 
 ## Choosing the verdict
 Read `verdict.allow_approve` and `verdict.gate` from `config/argus.yml`.

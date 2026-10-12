@@ -29,6 +29,7 @@ def _public_finding(f: dict) -> dict:
         "skill": f.get("skill") or "correctness",
         "location": f.get("location") or "—",
         "finding": f.get("finding") or "",
+        "impact": f.get("impact") or "",
         "suggested_fix": f.get("suggested_fix") or "",
     }
 
