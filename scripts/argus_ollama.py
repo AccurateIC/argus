@@ -811,6 +811,7 @@ def ledger_item_as_finding(item: dict) -> dict:
         "skill": str(item.get("skill") or "correctness"),
         "location": str(item.get("location") or item.get("path") or "—"),
         "finding": str(item.get("finding") or ""),
+        "impact": str(item.get("impact") or ""),
         "suggested_fix": "",
     }
 
@@ -1044,32 +1045,9 @@ def format_followup_sections(followup: dict[str, list[dict]]) -> list[str]:
     ]
 
     def _simple_table(items: list[dict], *, with_skill: bool) -> list[str]:
-        if with_skill:
-            rows = [
-                "| Sev | Skill | Location | Finding |",
-                "|-----|-------|----------|---------|",
-            ]
-            for f in items:
-                icon = SEV_ICON.get(str(f.get("severity") or "nit"), "⚪")
-                rows.append(
-                    f"| {icon} {md_table_cell(f.get('severity') or 'nit')} | "
-                    f"{md_table_cell(f.get('skill') or '—')} | "
-                    f"{md_table_cell(f.get('location') or f.get('path') or '—')} | "
-                    f"{md_table_cell(f.get('finding') or '')} |"
-                )
-            return rows
-        rows = [
-            "| Sev | Location | Finding |",
-            "|-----|----------|---------|",
-        ]
-        for f in items:
-            icon = SEV_ICON.get(str(f.get("severity") or "nit"), "⚪")
-            rows.append(
-                f"| {icon} {md_table_cell(f.get('severity') or 'nit')} | "
-                f"{md_table_cell(f.get('location') or f.get('path') or '—')} | "
-                f"{md_table_cell(f.get('finding') or '')} |"
-            )
-        return rows
+        # with_skill kept for call-site compatibility; skill is not shown in the table.
+        _ = with_skill
+        return _findings_table_lines(items, empty_clean=True)
 
     if resolved:
         lines += ["### ✅ Resolved since last review"] + _simple_table(resolved, with_skill=False) + [""]
@@ -1289,6 +1267,7 @@ FINDINGS_JSON_SCHEMA: dict = {
                     "skill": {"type": "string"},
                     "location": {"type": "string"},
                     "finding": {"type": "string"},
+                    "impact": {"type": "string"},
                     "suggested_fix": {"type": "string"},
                 },
             },
@@ -1438,6 +1417,7 @@ def normalize_findings(raw: dict) -> tuple[list[dict], int]:
                 "skill": str(f.get("skill") or "correctness").strip(),
                 "location": loc,
                 "finding": finding,
+                "impact": str(f.get("impact") or "").strip(),
                 "suggested_fix": str(f.get("suggested_fix") or "").strip(),
             }
         )
@@ -1460,28 +1440,33 @@ def md_table_cell(text: str) -> str:
     return flat.replace("|", "\\|")
 
 
+def _sev_label(sev: str) -> str:
+    """Icon + Title Case severity for review tables (e.g. 🔴 Blocker)."""
+    key = str(sev or "nit").lower().strip()
+    icon = SEV_ICON.get(key, "⚪")
+    return f"{icon} {key.title()}"
+
+
 def _findings_table_lines(findings: list[dict], *, empty_clean: bool) -> list[str]:
     lines = [
-        "| Sev | Skill | Location | Finding |",
-        "|-----|-------|----------|---------|",
+        "| Severity | File:Line | Finding | Impact | Suggested Fix |",
+        "|----------|-----------|---------|--------|---------------|",
     ]
     if not findings:
         lines.append(
-            "| — | — | — | No findings. |"
+            "| — | — | No findings. | — | — |"
             if empty_clean
-            else "| — | — | — | **Pass failed / incomplete** — treat as unreviewed. |"
+            else "| — | — | **Pass failed / incomplete** — treat as unreviewed. | — | — |"
         )
         return lines
     for f in findings:
         sev = str(f.get("severity") or "nit")
-        icon = SEV_ICON.get(sev, "⚪")
-        cell = md_table_cell(f.get("finding") or "")
-        fix = str(f.get("suggested_fix") or "")
-        if fix:
-            cell += " *Suggested:* " + md_table_cell(fix)
+        impact = str(f.get("impact") or "").strip() or "—"
+        fix = str(f.get("suggested_fix") or "").strip() or "—"
         lines.append(
-            f"| {icon} {sev} | {md_table_cell(f.get('skill') or '—')} "
-            f"| {md_table_cell(f.get('location') or '—')} | {cell} |"
+            f"| {_sev_label(sev)} | {md_table_cell(f.get('location') or '—')} | "
+            f"{md_table_cell(f.get('finding') or '')} | {md_table_cell(impact)} | "
+            f"{md_table_cell(fix)} |"
         )
     return lines
 
@@ -1964,14 +1949,18 @@ Return ONLY valid JSON (no markdown fences) with this schema:
       "severity": "blocker|major|minor|nit",
       "skill": "<skill name>",
       "location": "path:line or —",
-      "finding": "what's wrong — why it matters",
-      "suggested_fix": "optional short fix"
+      "finding": "what's wrong — plain English, one short sentence",
+      "impact": "what can go wrong for users/system — plain English, one short sentence",
+      "suggested_fix": "what to do — short and concrete"
     }}
   ],
   "questions": ["optional unsure items"],
   "memory_suggestions": ["optional"]
 }}
 Precision over volume. Do not re-flag accepted-patterns. Cite path:line.
+Keep finding / impact / suggested_fix as separate short fields (not combined).
+Write simply: everyday words, almost no jargon or unexplained acronyms.
+No long technical essays — each field one short sentence (about 15 words max).
 Severity gate in config is `{gate}`.
 Only review the diff provided (it may be one batch of a multi-batch PR review).
 """
@@ -2246,6 +2235,7 @@ Description:
                         "skill": f.get("skill") or "correctness",
                         "location": f.get("location") or "—",
                         "finding": f.get("finding") or "",
+                        "impact": f.get("impact") or "",
                         "suggested_fix": f.get("suggested_fix") or "",
                     }
                 )

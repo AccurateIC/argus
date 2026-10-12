@@ -2,12 +2,18 @@
 
 ## Inline comments
 Post inline comments **only** for `blocker`/`major`/`minor` findings, at the exact
-`path:line`. Format each:
+`path:line`. Format each in plain English (short, no jargon dump):
 
-> **[severity] skill:** what's wrong — why it matters. *Suggested fix:* …
+> **[severity] skill:** what's wrong. Why it matters. *Suggested fix:* …
 
 Skip inline comments for `nit`s (roll them into the summary) and for `question`s
 unless a specific line is needed.
+
+## Writing the finding fields
+- `finding` — what is wrong (simple words).
+- `impact` — what bad thing can happen to users or the system (simple words).
+- `suggested_fix` — what to do next (short, concrete).
+Avoid dense technical essays. One short sentence per field.
 
 ## Summary review body
 Post one summary with this shape:
@@ -18,11 +24,11 @@ Post one summary with this shape:
 **Verdict:** <REQUEST CHANGES | COMMENT | APPROVE>  ·  <n blocker · n major · n minor · n nit>
 
 ### Findings
-| Sev | Skill | Location | Finding |
-|-----|-------|----------|---------|
-| 🔴 blocker | security | api/views.py:212 | Missing tenant scope → IDOR |
-| 🟠 major   | correctness | tasks.py:88 | Non-atomic read-modify-write |
-| 🟡 minor   | tests | — | New branch in `accept()` is untested |
+| Severity | File:Line | Finding | Impact | Suggested Fix |
+|----------|-----------|---------|--------|---------------|
+| 🔴 Blocker | api/views.py:212 | Lookup is not limited to the caller's company | Another company's invite can be accepted | Filter by the caller's org |
+| 🟠 Major | tasks.py:88 | Balance update is not safe when two requests run at once | One spend can be lost | Lock the row or update atomically |
+| 🟡 Minor | — | New branch in `accept()` has no test | Bugs here can ship unnoticed | Add a test for that branch |
 
 ### Questions
 - <things you weren't sure enough to call findings>
@@ -31,7 +37,7 @@ Post one summary with this shape:
 - <a convention/accepted-pattern worth recording, for a human to merge>
 ```
 
-Severity icons: 🔴 blocker · 🟠 major · 🟡 minor · ⚪ nit.
+Severity icons: 🔴 Blocker · 🟠 Major · 🟡 Minor · ⚪ Nit.
 
 ## Choosing the verdict
 Read `verdict.allow_approve` and `verdict.gate` from `config/argus.yml`.

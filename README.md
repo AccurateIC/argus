@@ -129,13 +129,13 @@ The full data-flow and extension points are in [`docs/architecture.md`](docs/arc
 **Verdict:** REQUEST CHANGES  ·  1 blocker · 1 major · 2 minor · 1 nit
 
 ### Findings
-| Sev | Skill | Location | Finding |
-|-----|-------|----------|---------|
-| 🔴 blocker | security | api/invites/views.py:212 | `Invite.objects.get(pk=…)` isn't scoped to the caller's org → any user can accept another org's invite by id (IDOR). Scope by `request.user`'s org. |
-| 🟠 major | concurrency | billing/credits.py:88 | `c = get(); c.balance -= n; c.save()` is a non-atomic read-modify-write — two concurrent spends lose an update. Use `select_for_update()` or an atomic `F()` decrement. |
-| 🟡 minor | tests | — | The new `expired` branch in `accept()` has no test; add one that would fail without the guard. |
-| 🟡 minor | observability | tasks/webhook.py:41 | `except Exception: pass` swallows delivery failures silently — log with the event id. |
-| ⚪ nit | correctness | serializers.py:19 | Redundant `list()` around a comprehension. |
+| Severity | File:Line | Finding | Impact | Suggested Fix |
+|----------|-----------|---------|--------|---------------|
+| 🔴 Blocker | api/invites/views.py:212 | Invite lookup is not limited to the caller's company | Someone can accept another company's invite | Filter invites by the caller's org |
+| 🟠 Major | billing/credits.py:88 | Balance update is unsafe when two requests run together | One spend can be lost | Lock the row or update the balance in one step |
+| 🟡 Minor | — | New `expired` path in `accept()` has no test | Bugs here can ship unnoticed | Add a test for the expired case |
+| 🟡 Minor | tasks/webhook.py:41 | Errors are swallowed with empty `except` | Failed deliveries can go unnoticed | Log the failure with the event id |
+| ⚪ Nit | serializers.py:19 | Extra `list()` around a comprehension | Slightly harder to read | Drop the outer `list()` |
 
 ### Questions
 - `serializers.py:33` adds `email` to `PublicUserSerializer` — is this serializer used on any unauthenticated endpoint? If so it's a data-protection blocker.
