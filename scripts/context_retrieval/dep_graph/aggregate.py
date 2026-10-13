@@ -45,12 +45,8 @@ def aggregate_folders(graph: FileGraph, *, depth: int = 2) -> dict:
         }
     }
 
-    # Map each file to its immediate containing directory
-    for path, meta in graph.nodes.items():
-        folder = parent_dir(path)
-        file_to_folder[path] = folder
-        # Ensure folder and all ancestors exist
-        cur = folder
+    def ensure_folder(fid: str) -> None:
+        cur = fid
         while True:
             if cur not in folders:
                 folders[cur] = {
@@ -66,6 +62,17 @@ def aggregate_folders(graph: FileGraph, *, depth: int = 2) -> dict:
             if nxt is None:
                 break
             cur = nxt
+
+    # Shell dirs from disk walk (binary-only folders, .github, …)
+    for shell in getattr(graph, "extra_folders", None) or []:
+        if shell and shell != ".":
+            ensure_folder(shell)
+
+    # Map each file to its immediate containing directory
+    for path, meta in graph.nodes.items():
+        folder = parent_dir(path)
+        file_to_folder[path] = folder
+        ensure_folder(folder)
 
         info = folders[folder]
         info["file_count"] += 1
@@ -109,7 +116,7 @@ def aggregate_folders(graph: FileGraph, *, depth: int = 2) -> dict:
         for child in meta.get("children") or []:
             tree_edges.append({"from": fid, "to": child, "kind": "contains"})
 
-    # Import edges between folders (any depth): based on file imports
+    # Import / uses edges between folders (any depth)
     weights: dict[tuple[str, str], int] = defaultdict(int)
     for e in graph.edges:
         a = file_to_folder.get(e["from"])
@@ -118,9 +125,25 @@ def aggregate_folders(graph: FileGraph, *, depth: int = 2) -> dict:
             continue
         weights[(a, b)] += 1
 
+    # Path / mount refs: file → directory (e.g. backend → data/uploads)
+    for e in getattr(graph, "dir_refs", None) or []:
+        a = file_to_folder.get(e["from"])
+        b = e.get("to")
+        if not a or not b or a == b:
+            continue
+        ensure_folder(b)
+        weights[(a, b)] += 1
+
+    def _nested(a: str, b: str) -> bool:
+        """True if one folder contains the other (tree relationship, not a use)."""
+        if a == "(root)" or b == "(root)":
+            return False
+        return a.startswith(b + "/") or b.startswith(a + "/")
+
     folder_edges = [
         {"from": a, "to": b, "weight": w, "kind": "imports"}
         for (a, b), w in sorted(weights.items(), key=lambda x: (-x[1], x[0]))
+        if not _nested(a, b)
     ]
 
     return {

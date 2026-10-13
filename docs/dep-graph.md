@@ -1,6 +1,6 @@
-# Dependency graph (interactive HTML)
+# Dependency graph (static flowchart HTML)
 
-Argus builds a **single** interactive HTML file that shows how folders and files depend on each other in a TypeScript/JavaScript app repo.
+Argus builds a **single** static HTML flowchart that shows how folders relate in an app repo: containment tree, inferred pipeline handoff, and top-level uses.
 
 ## Automatic on every PR (no manual step)
 
@@ -44,13 +44,16 @@ Or on the runner: `python3 -m http.server 8765` in that folder, and on your lapt
 
 ## What you see in the HTML
 
-1. **Start at `(root)`** — only top-level folders (e.g. `app`, `agents`), with **grey lines** = “contains” (real repo tree).
-2. **Orange dashed arrows** = import/uses between folders or files.
-3. **Click a folder** — drill into its subfolders (not all nested folders dumped at once).
-4. **Show files** (or click a leaf folder) — files in that folder + orange import arrows (dim = outside).
-5. **← Up** — go to parent folder / back from files.
+Static left-to-right diagram (not clickable), polished overview style:
 
-No CDN (offline SVG + force layout).
+1. **Header** — “Argus Repository Dependency Graph” plus repo / commit / file counts.
+2. **Root card** — repository name, commit, file & folder counts.
+3. **Blue folders · teal files · purple numbered pipeline stages**.
+4. **Solid light arrows** = Contains · **Dashed blue** = Imports/uses · **Purple** = Handoff order.
+5. **Legend bar** at the bottom.
+6. One stage expanded as an example when a pipeline group is detected.
+
+No CDN — pure SVG embedded in one HTML file.
 
 ## Manual CLI (optional / debugging only)
 
@@ -67,8 +70,9 @@ Workflow entrypoint: [`scripts/build_pr_dep_graph.sh`](../scripts/build_pr_dep_g
 
 ## Notes
 
-- **Full repo graph:** every non-binary file is a node (Python, JS/TS, CSS, HTML, JSON, Markdown, Vue, etc.).
-- Edges from language-aware refs: JS/TS `import`/`require`, Python `import`/`from`, CSS `@import`/`url()`, HTML `src`/`href`, plus quoted relative paths.
+- **Full repo scan:** every non-binary file is indexed (Python, JS/TS, CSS, HTML, JSON, Markdown, Vue, etc.).
+- Edges from language-aware refs: JS/TS `import`/`require`, Python `import`/`from`, CSS `@import`/`url()`, HTML `src`/`href`, Path chains, quoted paths.
+- Folder shells include binary-only dirs (e.g. `data/` with PDFs) and `.github`.
 - Skips junk dirs (`node_modules`, `dist`, `.next`, `.git`, venvs, …) and binaries (images, fonts, archives, …).
 - Resolves relative paths and simple `tsconfig` `paths` aliases.
 - npm/PyPI packages are external (not expanded into site-packages).

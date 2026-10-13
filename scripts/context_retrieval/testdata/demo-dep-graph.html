@@ -3,522 +3,79 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Argus dependency graph — Tree graph</title>
+<title>Argus Repository Dependency Graph — AccurateIC/Agentic-QBMS</title>
 <style>
-  :root {
-    --bg: #0f1419;
-    --panel: #1a2332;
-    --text: #e7ecf3;
-    --muted: #8b9bb4;
-    --accent: #3d9cf0;
-    --folder: #5b8def;
-    --file: #3ecf8e;
-    --test: #e6a23c;
-    --edge-tree: #6b7c93;
-    --edge-dep: #f0a030;
-    --ext: #7a8699;
-  }
+  :root { --bg: #0b1220; --text: #e8eef8; }
   * { box-sizing: border-box; }
   body {
-    margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
-    background: var(--bg); color: var(--text); height: 100vh;
-    display: flex; flex-direction: column;
+    margin: 0; font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
   }
-  header {
-    padding: 10px 16px; background: var(--panel);
-    border-bottom: 1px solid #2a3548;
-    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-  }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
-  header .meta { color: var(--muted); font-size: 12px; }
-  #toolbar { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
-  button {
-    background: #243044; color: var(--text); border: 1px solid #3a4a63;
-    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
-  }
-  button:hover { background: #2d3c54; }
-  button:disabled { opacity: 0.4; cursor: default; }
-  #breadcrumb { font-size: 13px; color: var(--muted); width: 100%; }
-  #breadcrumb strong { color: var(--accent); }
-  #stage { flex: 1; position: relative; overflow: hidden; }
-  svg { width: 100%; height: 100%; display: block; cursor: grab; }
-  svg:active { cursor: grabbing; }
-  .node circle { stroke: #0f1419; stroke-width: 2; cursor: pointer; }
-  .node.folder circle { fill: var(--folder); }
-  .node.file circle { fill: var(--file); }
-  .node.test circle { fill: var(--test); }
-  .node.external circle { fill: var(--ext); }
-  .node text {
-    fill: var(--text); font-size: 11px; pointer-events: none;
-    text-anchor: middle; paint-order: stroke; stroke: var(--bg); stroke-width: 3px;
-  }
-  .link.tree { stroke: var(--edge-tree); stroke-opacity: 0.9; fill: none; }
-  .link.imports { stroke: var(--edge-dep); stroke-opacity: 0.95; fill: none; stroke-dasharray: 6 4; }
-  .hint {
-    position: absolute; bottom: 12px; left: 12px; right: 12px;
-    color: var(--muted); font-size: 12px; pointer-events: none;
-  }
-  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
-  .legend span::before {
-    content: ""; display: inline-block; width: 8px; height: 8px;
-    border-radius: 50%; margin-right: 4px; vertical-align: middle;
-  }
-  .legend .l-folder::before { background: var(--folder); }
-  .legend .l-file::before { background: var(--file); }
-  .legend .l-test::before { background: var(--test); }
-  .legend .l-ext::before { background: var(--ext); }
-  .legend .l-tree::before { background: var(--edge-tree); border-radius: 0; height: 2px; width: 14px; vertical-align: middle; }
-  .legend .l-dep::before { background: var(--edge-dep); border-radius: 0; height: 2px; width: 14px; vertical-align: middle; }
+  #wrap { padding: 8px 12px 20px; overflow: auto; }
+  #wrap svg { display: block; margin: 0 auto; max-width: none; }
 </style>
 </head>
 <body>
-<header>
-  <h1>Argus dependency graph</h1>
-  <div class="meta" id="meta"></div>
-  <div id="toolbar">
-    <div class="legend">
-      <span class="l-folder">folder</span>
-      <span class="l-file">file</span>
-      <span class="l-test">test</span>
-      <span class="l-ext">outside</span>
-      <span class="l-tree">tree (contains)</span>
-      <span class="l-dep">imports / uses</span>
-    </div>
-    <button type="button" id="btnFiles" disabled>Show files</button>
-    <button type="button" id="btnBack" disabled>← Up</button>
-  </div>
-  <div id="breadcrumb">View: <strong>(root)</strong> — click a folder to open it</div>
-</header>
-<div id="stage">
-  <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
-  <div class="hint" id="hint">Grey lines = folder tree · Orange dashed = imports · Click folder to drill in · Show files for file relationships</div>
+<div id="wrap">
+<svg xmlns="http://www.w3.org/2000/svg" width="1056" height="813" viewBox="0 0 1056 813" role="img" aria-label="Argus Repository Dependency Graph">
+<rect width="100%" height="100%" fill="#0b1220"/>
+<defs>
+<marker id="arrow-contains" markerWidth="9" markerHeight="7.2" refX="8" refY="3.6" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L9,3.6 L0,7.2 Z" fill="#c5d0e0"/></marker>
+<marker id="arrow-handoff" markerWidth="6" markerHeight="4.800000000000001" refX="5" refY="2.4000000000000004" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L6,2.4000000000000004 L0,4.800000000000001 Z" fill="#8b7cf7"/></marker>
+<marker id="arrow-uses" markerWidth="9" markerHeight="7.2" refX="8" refY="3.6" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L9,3.6 L0,7.2 Z" fill="#5b9fd4"/></marker>
+</defs>
+<text x="28" y="28" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" font-weight="700">Argus Repository Dependency Graph</text>
+<text x="28" y="48" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Repository: AccurateIC/Agentic-QBMS  ·  Commit: 5bc9f66  ·  Files: 30  ·  File-links: 7  ·  Folders: 35  ·  static flowchart</text>
+<path d="M506.0,283.0 H554.0 V138.0 H602.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M506.0,283.0 H554.0 V196.0 H602.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M506.0,283.0 H554.0 V254.0 H602.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M506.0,283.0 H554.0 V312.0 H602.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M506.0,283.0 H554.0 V370.0 H602.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M506.0,283.0 H554.0 V428.0 H602.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M506.0,283.0 H556.5 V486.0 H607.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M506.0,283.0 H556.5 V544.0 H607.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M770.0,196.0 H818.0 V196.0 H866.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M770.0,196.0 H818.0 V254.0 H866.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M770.0,196.0 H818.0 V312.0 H866.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M770.0,196.0 H818.0 V370.0 H866.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M252.0,283.0 H300.0 V341.0 H348.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M252.0,283.0 H300.0 V399.0 H348.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M252.0,283.0 H300.0 V457.0 H348.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M252.0,283.0 H300.0 V515.0 H348.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M252.0,283.0 H300.0 V573.0 H348.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M252.0,283.0 H300.0 V631.0 H348.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M252.0,283.0 H300.0 V283.0 H348.0" fill="none" stroke="#c5d0e0" stroke-width="1.6" marker-end="url(#arrow-contains)"/>
+<path d="M427.0,301.0 V685.0 H427.0 V475.0" fill="none" stroke="#5b9fd4" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrow-uses)"/>
+<path d="M427.0,417.0 V685.0 H427.0 V475.0" fill="none" stroke="#5b9fd4" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrow-uses)"/>
+<g><rect x="602.0" y="120.0" width="168" height="36" rx="8" ry="8" fill="#4c3db8" stroke="#8b7cf7" stroke-width="1.4"/><circle cx="620.0" cy="138.0" r="10" fill="#3d2fa0" stroke="#8b7cf7" stroke-width="1.2"/><text x="620.0" y="142.0" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">1</text><text x="638.0" y="142.0" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">ingestion/</text><title>agents/ingestion</title></g>
+<g><rect x="602.0" y="178.0" width="168" height="36" rx="8" ry="8" fill="#4c3db8" stroke="#8b7cf7" stroke-width="1.4"/><circle cx="620.0" cy="196.0" r="10" fill="#3d2fa0" stroke="#8b7cf7" stroke-width="1.2"/><text x="620.0" y="200.0" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">2</text><text x="638.0" y="200.0" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">extraction/</text><title>agents/extraction</title></g>
+<g><rect x="602.0" y="236.0" width="168" height="36" rx="8" ry="8" fill="#4c3db8" stroke="#8b7cf7" stroke-width="1.4"/><circle cx="620.0" cy="254.0" r="10" fill="#3d2fa0" stroke="#8b7cf7" stroke-width="1.2"/><text x="620.0" y="258.0" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">3</text><text x="638.0" y="258.0" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">structuring/</text><title>agents/structuring</title></g>
+<g><rect x="602.0" y="294.0" width="168" height="36" rx="8" ry="8" fill="#4c3db8" stroke="#8b7cf7" stroke-width="1.4"/><circle cx="620.0" cy="312.0" r="10" fill="#3d2fa0" stroke="#8b7cf7" stroke-width="1.2"/><text x="620.0" y="316.0" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">4</text><text x="638.0" y="316.0" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">question_gen/</text><title>agents/question_gen</title></g>
+<g><rect x="602.0" y="352.0" width="168" height="36" rx="8" ry="8" fill="#4c3db8" stroke="#8b7cf7" stroke-width="1.4"/><circle cx="620.0" cy="370.0" r="10" fill="#3d2fa0" stroke="#8b7cf7" stroke-width="1.2"/><text x="620.0" y="374.0" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">5</text><text x="638.0" y="374.0" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">qa_validation/</text><title>agents/qa_validation</title></g>
+<g><rect x="602.0" y="410.0" width="168" height="36" rx="8" ry="8" fill="#4c3db8" stroke="#8b7cf7" stroke-width="1.4"/><circle cx="620.0" cy="428.0" r="10" fill="#3d2fa0" stroke="#8b7cf7" stroke-width="1.2"/><text x="620.0" y="432.0" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">6</text><text x="638.0" y="432.0" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">assembly/</text><title>agents/assembly</title></g>
+<g><rect x="607.0" y="468.0" width="158" height="36" rx="8" ry="8" fill="#0f2420" stroke="#2dd4a8" stroke-width="1.4"/><path d="M620.0,476.0 h8 l5,5 v12 h-13 z" fill="none" stroke="#3ecf8e" stroke-width="1.4" stroke-linejoin="round"/><path d="M628.0,476.0 v5 h5" fill="none" stroke="#3ecf8e" stroke-width="1.4"/><text x="641.0" y="490.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">QC_CHECKLIST.md</text><title>agents/QC_CHECKLIST.md</title></g>
+<g><rect x="607.0" y="526.0" width="158" height="36" rx="8" ry="8" fill="#0f2420" stroke="#2dd4a8" stroke-width="1.4"/><path d="M620.0,534.0 h8 l5,5 v12 h-13 z" fill="none" stroke="#3ecf8e" stroke-width="1.4" stroke-linejoin="round"/><path d="M628.0,534.0 v5 h5" fill="none" stroke="#3ecf8e" stroke-width="1.4"/><text x="641.0" y="548.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">README.md</text><title>agents/README.md</title></g>
+<g><rect x="866.0" y="178.0" width="158" height="36" rx="8" ry="8" fill="#132033" stroke="#3b82c4" stroke-width="1.4"/><path d="M876.0,190.0 h6 l2,3 h10 v11 h-18 z" fill="none" stroke="#5ba3e0" stroke-width="1.4" stroke-linejoin="round"/><text x="900.0" y="200.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">memory/</text><title>agents/extraction/memory</title></g>
+<g><rect x="866.0" y="236.0" width="158" height="36" rx="8" ry="8" fill="#132033" stroke="#3b82c4" stroke-width="1.4"/><path d="M876.0,248.0 h6 l2,3 h10 v11 h-18 z" fill="none" stroke="#5ba3e0" stroke-width="1.4" stroke-linejoin="round"/><text x="900.0" y="258.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">src/</text><title>agents/extraction/src</title></g>
+<g><rect x="866.0" y="294.0" width="158" height="36" rx="8" ry="8" fill="#0f2420" stroke="#2dd4a8" stroke-width="1.4"/><path d="M879.0,302.0 h8 l5,5 v12 h-13 z" fill="none" stroke="#3ecf8e" stroke-width="1.4" stroke-linejoin="round"/><path d="M887.0,302.0 v5 h5" fill="none" stroke="#3ecf8e" stroke-width="1.4"/><text x="900.0" y="316.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">AGENT.md</text><title>agents/extraction/AGENT.md</title></g>
+<g><rect x="866.0" y="352.0" width="158" height="36" rx="8" ry="8" fill="#0f2420" stroke="#2dd4a8" stroke-width="1.4"/><path d="M879.0,360.0 h8 l5,5 v12 h-13 z" fill="none" stroke="#3ecf8e" stroke-width="1.4" stroke-linejoin="round"/><path d="M887.0,360.0 v5 h5" fill="none" stroke="#3ecf8e" stroke-width="1.4"/><text x="900.0" y="374.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">memory.md</text><title>agents/extraction/memory.md</title></g>
+<g><rect x="32.0" y="249.0" width="220" height="68" rx="10" ry="10" fill="#152033" stroke="#3d5a80" stroke-width="1.6"/><circle cx="48.0" cy="277.0" r="2.5" fill="none" stroke="#5b9fd4" stroke-width="1.3"/><circle cx="48.0" cy="289.0" r="2.5" fill="none" stroke="#5b9fd4" stroke-width="1.3"/><circle cx="58.0" cy="283.0" r="2.5" fill="none" stroke="#5b9fd4" stroke-width="1.3"/><path d="M48.0,279.5 V286.5 M48.0,283.0 H55.5" fill="none" stroke="#5b9fd4" stroke-width="1.3"/><text x="68.0" y="277.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600">AccurateIC/Agentic-QBMS</text><text x="68.0" y="297.0" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">@5bc9f66 · 30 files · 35 folders</text><title>(root)</title></g>
+<g><rect x="348.0" y="265.0" width="158" height="36" rx="8" ry="8" fill="#132033" stroke="#3b82c4" stroke-width="1.4"/><path d="M358.0,277.0 h6 l2,3 h10 v11 h-18 z" fill="none" stroke="#5ba3e0" stroke-width="1.4" stroke-linejoin="round"/><text x="382.0" y="287.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">agents/</text><title>agents</title></g>
+<g><rect x="348.0" y="323.0" width="158" height="36" rx="8" ry="8" fill="#132033" stroke="#3b82c4" stroke-width="1.4"/><path d="M358.0,335.0 h6 l2,3 h10 v11 h-18 z" fill="none" stroke="#5ba3e0" stroke-width="1.4" stroke-linejoin="round"/><text x="382.0" y="345.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">.github/</text><title>.github</title></g>
+<g><rect x="348.0" y="381.0" width="158" height="36" rx="8" ry="8" fill="#132033" stroke="#3b82c4" stroke-width="1.4"/><path d="M358.0,393.0 h6 l2,3 h10 v11 h-18 z" fill="none" stroke="#5ba3e0" stroke-width="1.4" stroke-linejoin="round"/><text x="382.0" y="403.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">app/</text><title>app</title></g>
+<g><rect x="348.0" y="439.0" width="158" height="36" rx="8" ry="8" fill="#132033" stroke="#3b82c4" stroke-width="1.4"/><path d="M358.0,451.0 h6 l2,3 h10 v11 h-18 z" fill="none" stroke="#5ba3e0" stroke-width="1.4" stroke-linejoin="round"/><text x="382.0" y="461.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">data/</text><title>data</title></g>
+<g><rect x="348.0" y="497.0" width="158" height="36" rx="8" ry="8" fill="#0f2420" stroke="#2dd4a8" stroke-width="1.4"/><path d="M361.0,505.0 h8 l5,5 v12 h-13 z" fill="none" stroke="#3ecf8e" stroke-width="1.4" stroke-linejoin="round"/><path d="M369.0,505.0 v5 h5" fill="none" stroke="#3ecf8e" stroke-width="1.4"/><text x="382.0" y="519.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">.gitignore</text><title>.gitignore</title></g>
+<g><rect x="348.0" y="555.0" width="158" height="36" rx="8" ry="8" fill="#0f2420" stroke="#2dd4a8" stroke-width="1.4"/><path d="M361.0,563.0 h8 l5,5 v12 h-13 z" fill="none" stroke="#3ecf8e" stroke-width="1.4" stroke-linejoin="round"/><path d="M369.0,563.0 v5 h5" fill="none" stroke="#3ecf8e" stroke-width="1.4"/><text x="382.0" y="577.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">README.md</text><title>README.md</title></g>
+<g><rect x="348.0" y="613.0" width="158" height="36" rx="8" ry="8" fill="#0f2420" stroke="#2dd4a8" stroke-width="1.4"/><path d="M361.0,621.0 h8 l5,5 v12 h-13 z" fill="none" stroke="#3ecf8e" stroke-width="1.4" stroke-linejoin="round"/><path d="M369.0,621.0 v5 h5" fill="none" stroke="#3ecf8e" stroke-width="1.4"/><text x="382.0" y="635.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">cmd.md</text><title>cmd.md</title></g>
+<path d="M686.0,156.0 V177.0" fill="none" stroke="#8b7cf7" stroke-width="2.6" marker-end="url(#arrow-handoff)"/>
+<path d="M686.0,214.0 V235.0" fill="none" stroke="#8b7cf7" stroke-width="2.6" marker-end="url(#arrow-handoff)"/>
+<path d="M686.0,272.0 V293.0" fill="none" stroke="#8b7cf7" stroke-width="2.6" marker-end="url(#arrow-handoff)"/>
+<path d="M686.0,330.0 V351.0" fill="none" stroke="#8b7cf7" stroke-width="2.6" marker-end="url(#arrow-handoff)"/>
+<path d="M686.0,388.0 V409.0" fill="none" stroke="#8b7cf7" stroke-width="2.6" marker-end="url(#arrow-handoff)"/>
+<text x="28" y="675.0" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Other stages under the same parent follow this same pattern</text>
+<g class="legend"><rect x="24.0" y="717.0" width="1008.0" height="88" rx="10" fill="#121a2b" stroke="#2a3650" stroke-width="1.2"/><text x="40.0" y="739.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="700">How to read this graph</text><path d="M54.0,766.0 h7 l2.5,3 h11.5 v10 h-21 z" fill="#3b82f6" stroke="#3b82f6" stroke-width="0.5" stroke-linejoin="round"/><text x="76.0" y="763.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Folder:</text><text x="76.0" y="779.0" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">holds files or other folders.</text><line x1="235.2" y1="749.0" x2="235.2" y2="793.0" stroke="#2a3650" stroke-width="1"/><path d="M251.2,759.0 h9 l5,5 v13 h-14 z" fill="none" stroke="#10b981" stroke-width="1.6" stroke-linejoin="round"/><path d="M260.2,759.0 v5 h5" fill="none" stroke="#10b981" stroke-width="1.6"/><path d="M254.2,770.0 h8 M254.2,773.5 h8 M254.2,777.0 h5" stroke="#10b981" stroke-width="1.2"/><text x="271.2" y="763.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">File:</text><text x="271.2" y="779.0" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">a document or code file.</text><line x1="430.4" y1="749.0" x2="430.4" y2="793.0" stroke="#2a3650" stroke-width="1"/><line x1="444.4" y1="769.0" x2="466.4" y2="769.0" stroke="#c5d0e0" stroke-width="2.2" marker-end="url(#arrow-contains)"/><text x="474.4" y="763.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Contains:</text><text x="474.4" y="779.0" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">folder → what’s inside it.</text><line x1="625.6" y1="749.0" x2="625.6" y2="793.0" stroke="#2a3650" stroke-width="1"/><circle cx="641.6" cy="758.0" r="7" fill="#8b5cf6" stroke="#a78bfa"/><text x="641.6" y="761.5" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="9" font-weight="700">1</text><line x1="641.6" y1="766.0" x2="641.6" y2="773.0" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arrow-handoff)"/><circle cx="641.6" cy="781.0" r="7" fill="#8b5cf6" stroke="#a78bfa"/><text x="641.6" y="784.5" text-anchor="middle" fill="#fff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="9" font-weight="700">2</text><text x="657.6" y="763.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Pipeline order:</text><text x="657.6" y="779.0" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">step 1 runs before step 2.</text><line x1="820.8" y1="749.0" x2="820.8" y2="793.0" stroke="#2a3650" stroke-width="1"/><line x1="834.8" y1="769.0" x2="856.8" y2="769.0" stroke="#5b9fd4" stroke-width="2.2" stroke-dasharray="5 3" marker-end="url(#arrow-uses)"/><text x="864.8" y="763.0" fill="#e8eef8" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">Uses / imports:</text><text x="864.8" y="779.0" fill="#8b9bb4" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">one part depends on another.</text></g>
+</svg>
 </div>
-<script>
-const DATA = {"repo":"AccurateIC/mini_app","commit":"abcdef1","built_at":"2026-10-13T05:33:30Z","title":"Tree graph","nodes":{"packages/validation/src/schema.ts":{"lang":"ts","kind":"source"},"apps/api/src/service.ts":{"lang":"ts","kind":"source"},"apps/api/src/service.test.ts":{"lang":"ts","kind":"test"},"apps/api/src/util.py":{"lang":"py","kind":"source"},"apps/api/src/app.py":{"lang":"py","kind":"source"},"apps/api/src/controller.ts":{"lang":"ts","kind":"source"},"apps/web/index.html":{"lang":"html","kind":"source"},"apps/web/src/styles.css":{"lang":"css","kind":"source"},"apps/web/src/theme.css":{"lang":"css","kind":"source"},"apps/web/src/app.ts":{"lang":"ts","kind":"source"}},"edges":[{"from":"apps/api/src/service.test.ts","to":"apps/api/src/service.ts","via":"ref"},{"from":"apps/api/src/app.py","to":"apps/api/src/util.py","via":"ref"},{"from":"apps/api/src/controller.ts","to":"apps/api/src/service.ts","via":"ref"},{"from":"apps/web/index.html","to":"apps/web/src/styles.css","via":"ref"},{"from":"apps/web/index.html","to":"apps/web/src/app.ts","via":"ref"},{"from":"apps/web/src/styles.css","to":"apps/web/src/theme.css","via":"ref"},{"from":"apps/web/src/app.ts","to":"packages/validation/src/schema.ts","via":"ref"}],"folders":{"(root)":{"file_count":0,"test_count":0,"files":[],"children":["apps","packages"],"parent":null},"packages/validation/src":{"file_count":1,"test_count":0,"files":["packages/validation/src/schema.ts"],"children":[],"parent":"packages/validation"},"packages/validation":{"file_count":0,"test_count":0,"files":[],"children":["packages/validation/src"],"parent":"packages"},"packages":{"file_count":0,"test_count":0,"files":[],"children":["packages/validation"],"parent":"(root)"},"apps/api/src":{"file_count":5,"test_count":1,"files":["apps/api/src/app.py","apps/api/src/controller.ts","apps/api/src/service.test.ts","apps/api/src/service.ts","apps/api/src/util.py"],"children":[],"parent":"apps/api"},"apps/api":{"file_count":0,"test_count":0,"files":[],"children":["apps/api/src"],"parent":"apps"},"apps":{"file_count":0,"test_count":0,"files":[],"children":["apps/api","apps/web"],"parent":"(root)"},"apps/web":{"file_count":1,"test_count":0,"files":["apps/web/index.html"],"children":["apps/web/src"],"parent":"apps"},"apps/web/src":{"file_count":3,"test_count":0,"files":["apps/web/src/app.ts","apps/web/src/styles.css","apps/web/src/theme.css"],"children":[],"parent":"apps/web"}},"tree_edges":[{"from":"(root)","to":"apps","kind":"contains"},{"from":"(root)","to":"packages","kind":"contains"},{"from":"packages/validation","to":"packages/validation/src","kind":"contains"},{"from":"packages","to":"packages/validation","kind":"contains"},{"from":"apps/api","to":"apps/api/src","kind":"contains"},{"from":"apps","to":"apps/api","kind":"contains"},{"from":"apps","to":"apps/web","kind":"contains"},{"from":"apps/web","to":"apps/web/src","kind":"contains"}],"folder_edges":[{"from":"apps/web","to":"apps/web/src","weight":2,"kind":"imports"},{"from":"apps/web/src","to":"packages/validation/src","weight":1,"kind":"imports"}],"languages":["css","html","py","ts"],"stats":{"files":10,"edges":7,"folders":9}};
-
-const svg = document.getElementById("canvas");
-const btnBack = document.getElementById("btnBack");
-const btnFiles = document.getElementById("btnFiles");
-const breadcrumb = document.getElementById("breadcrumb");
-const metaEl = document.getElementById("meta");
-
-metaEl.textContent = [
-  DATA.repo || "local",
-  DATA.commit ? ("@" + DATA.commit.slice(0, 7)) : "",
-  (DATA.stats && DATA.stats.files) ? (DATA.stats.files + " files") : "",
-  (DATA.stats && DATA.stats.edges) ? (DATA.stats.edges + " file-links") : "",
-  (DATA.stats && DATA.stats.folders) ? (DATA.stats.folders + " folders") : "",
-  (DATA.languages && DATA.languages.length) ? DATA.languages.slice(0, 8).join("/") : "",
-].filter(Boolean).join(" · ");
-
-let mode = "tree"; // tree | files
-let currentDir = "(root)";
-let nodes = [];
-let links = [];
-let transform = { x: 0, y: 0, k: 1 };
-let simTimer = null;
-
-function shortLabel(id, max) {
-  max = max || 28;
-  if (!id) return "";
-  if (id === "(root)") return "(root)";
-  const base = id.split("/").pop();
-  if (base.length <= max) return base;
-  return base.slice(0, max - 1) + "…";
-}
-
-function folderInfo(id) {
-  return (DATA.folders && DATA.folders[id]) || null;
-}
-
-function buildTreeScene(dirId) {
-  const folders = DATA.folders || {};
-  const info = folders[dirId] || { children: [], files: [] };
-  const childIds = info.children || [];
-  const nodeMap = {};
-
-  // Center node = current directory
-  nodeMap[dirId] = {
-    id: dirId,
-    label: shortLabel(dirId, 40),
-    kind: "folder",
-    title: dirId + " (current)",
-    r: 16,
-    isCurrent: true,
-  };
-
-  childIds.forEach((cid) => {
-    const c = folders[cid] || {};
-    nodeMap[cid] = {
-      id: cid,
-      label: shortLabel(cid, 36),
-      kind: "folder",
-      title: cid + " — " + (c.file_count || 0) + " files, " + ((c.children || []).length) + " subfolders",
-      r: 12 + Math.min(10, Math.sqrt((c.file_count || 1))),
-      isCurrent: false,
-    };
-  });
-
-  nodes = Object.values(nodeMap);
-  const idset = new Set(nodes.map((n) => n.id));
-
-  // Tree edges: current → each child
-  links = childIds.map((cid) => ({
-    source: dirId,
-    target: cid,
-    weight: 2,
-    kind: "tree",
-  }));
-
-  // Import edges among visible folders (children + current)
-  (DATA.folder_edges || []).forEach((e) => {
-    if (idset.has(e.from) && idset.has(e.to) && e.from !== e.to) {
-      links.push({
-        source: e.from,
-        target: e.to,
-        weight: e.weight || 1,
-        kind: "imports",
-      });
-    }
-  });
-}
-
-function buildFileScene(folderId) {
-  const folders = DATA.folders || {};
-  const info = folders[folderId] || { files: [] };
-  const fileSet = new Set(info.files || []);
-  const nodeMap = {};
-
-  (info.files || []).forEach((p) => {
-    const meta = (DATA.nodes && DATA.nodes[p]) || {};
-    nodeMap[p] = {
-      id: p,
-      label: shortLabel(p, 40),
-      kind: meta.kind === "test" ? "test" : "file",
-      title: p + (meta.lang ? " [" + meta.lang + "]" : ""),
-      r: 10,
-      external: false,
-    };
-  });
-
-  const fileEdges = (DATA.edges || []).filter(
-    (e) => fileSet.has(e.from) || fileSet.has(e.to)
-  );
-  fileEdges.forEach((e) => {
-    [e.from, e.to].forEach((p) => {
-      if (!nodeMap[p]) {
-        nodeMap[p] = {
-          id: p,
-          label: shortLabel(p, 40),
-          kind: "external",
-          title: p + " (outside " + folderId + ")",
-          r: 9,
-          external: true,
-        };
-      }
-    });
-  });
-
-  nodes = Object.values(nodeMap);
-  links = fileEdges.map((e) => ({
-    source: e.from,
-    target: e.to,
-    weight: 1,
-    kind: "imports",
-  }));
-}
-
-function updateChrome() {
-  const info = folderInfo(currentDir) || {};
-  const nFiles = (info.files || []).length;
-  const nKids = (info.children || []).length;
-  if (mode === "tree") {
-    breadcrumb.innerHTML =
-      "Folder tree at <strong>" + currentDir + "</strong> — " +
-      nKids + " subfolders · " + nFiles + " files here · grey=contains · orange dashed=imports";
-    btnFiles.disabled = nFiles === 0;
-    btnBack.disabled = currentDir === "(root)";
-  } else {
-    breadcrumb.innerHTML =
-      "Files in <strong>" + currentDir + "</strong> — orange arrows = imports/uses · dim = outside folder";
-    btnFiles.disabled = true;
-    btnBack.disabled = false;
-  }
-}
-
-function showTree(dirId) {
-  mode = "tree";
-  currentDir = dirId || "(root)";
-  buildTreeScene(currentDir);
-  updateChrome();
-  restartSim(true);
-}
-
-function showFiles(folderId) {
-  mode = "files";
-  currentDir = folderId || currentDir;
-  buildFileScene(currentDir);
-  updateChrome();
-  restartSim(false);
-}
-
-btnBack.addEventListener("click", () => {
-  if (mode === "files") {
-    showTree(currentDir);
-    return;
-  }
-  const info = folderInfo(currentDir);
-  const parent = (info && info.parent != null) ? info.parent : "(root)";
-  showTree(parent || "(root)");
-});
-
-btnFiles.addEventListener("click", () => {
-  showFiles(currentDir);
-});
-
-function restartSim(treeLayout) {
-  const W = svg.clientWidth || 900;
-  const H = svg.clientHeight || 600;
-  const cx = W / 2;
-  const cy = H / 2;
-
-  if (treeLayout && mode === "tree" && nodes.length) {
-    // Hierarchical: current at top, children in a row below
-    const cur = nodes.find((n) => n.isCurrent) || nodes[0];
-    const kids = nodes.filter((n) => !n.isCurrent);
-    cur.x = cx;
-    cur.y = H * 0.22;
-    cur.vx = 0; cur.vy = 0;
-    kids.forEach((n, i) => {
-      const span = Math.min(W * 0.8, Math.max(200, kids.length * 90));
-      n.x = cx - span / 2 + (kids.length === 1 ? span / 2 : (i * span) / (kids.length - 1));
-      n.y = H * 0.55;
-      n.vx = 0; n.vy = 0;
-    });
-  } else {
-    const n = nodes.length || 1;
-    nodes.forEach((node, i) => {
-      const angle = (2 * Math.PI * i) / n - Math.PI / 2;
-      const rad = Math.min(W, H) * 0.28;
-      node.x = cx + Math.cos(angle) * rad;
-      node.y = cy + Math.sin(angle) * rad;
-      node.vx = 0;
-      node.vy = 0;
-    });
-  }
-
-  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
-  links.forEach((l) => {
-    l.sourceNode = byId[l.source];
-    l.targetNode = byId[l.target];
-  });
-  transform = { x: 0, y: 0, k: 1 };
-  if (simTimer) cancelAnimationFrame(simTimer);
-  let tick = 0;
-  function step() {
-    tick++;
-    const alpha = Math.max(0.015, 1 - tick / 160);
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i], b = nodes[j];
-        let dx = a.x - b.x, dy = a.y - b.y;
-        let dist2 = dx * dx + dy * dy || 1;
-        let dist = Math.sqrt(dist2);
-        const minD = (a.r + b.r) * 3.5;
-        if (dist < minD * 2.8) {
-          const f = (minD * minD) / dist2 * alpha * 0.55;
-          dx = (dx / dist) * f;
-          dy = (dy / dist) * f;
-          a.vx += dx; a.vy += dy;
-          b.vx -= dx; b.vy -= dy;
-        }
-      }
-    }
-    links.forEach((l) => {
-      const a = l.sourceNode, b = l.targetNode;
-      if (!a || !b) return;
-      let dx = b.x - a.x, dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const ideal = l.kind === "tree" ? 120 : 100;
-      const f = (dist - ideal) * 0.035 * alpha;
-      dx = (dx / dist) * f;
-      dy = (dy / dist) * f;
-      a.vx += dx; a.vy += dy;
-      b.vx -= dx; b.vy -= dy;
-    });
-    nodes.forEach((n) => {
-      if (treeLayout && mode === "tree" && n.isCurrent) {
-        // keep current near top
-        n.vy += (H * 0.22 - n.y) * 0.02;
-      }
-      n.vx += (cx - n.x) * 0.003 * alpha;
-      n.vy += (cy - n.y) * 0.002 * alpha;
-      n.vx *= 0.85;
-      n.vy *= 0.85;
-      if (!n.fixed) {
-        n.x += n.vx;
-        n.y += n.vy;
-      }
-    });
-    draw();
-    if (tick < 180) simTimer = requestAnimationFrame(step);
-  }
-  step();
-}
-
-function drawArrowHead(g, ns, x1, y1, x2, y2, color) {
-  const dx = x2 - x1, dy = y2 - y1;
-  const len = Math.sqrt(dx * dx + dy * dy) || 1;
-  const ux = dx / len, uy = dy / len;
-  // tip slightly before node edge
-  const tipX = x2 - ux * 12;
-  const tipY = y2 - uy * 12;
-  const ax = tipX - ux * 8 + uy * 4;
-  const ay = tipY - uy * 8 - ux * 4;
-  const bx = tipX - ux * 8 - uy * 4;
-  const by = tipY - uy * 8 + ux * 4;
-  const poly = document.createElementNS(ns, "polygon");
-  poly.setAttribute("points", tipX + "," + tipY + " " + ax + "," + ay + " " + bx + "," + by);
-  poly.setAttribute("fill", color);
-  g.appendChild(poly);
-}
-
-function draw() {
-  const ns = "http://www.w3.org/2000/svg";
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
-  const gRoot = document.createElementNS(ns, "g");
-  gRoot.setAttribute(
-    "transform",
-    "translate(" + transform.x + "," + transform.y + ") scale(" + transform.k + ")"
-  );
-  svg.appendChild(gRoot);
-
-  // Draw tree links first, then import links
-  const ordered = links.slice().sort((a, b) => (a.kind === "imports" ? 1 : 0) - (b.kind === "imports" ? 1 : 0));
-  ordered.forEach((l) => {
-    const a = l.sourceNode, b = l.targetNode;
-    if (!a || !b) return;
-    const line = document.createElementNS(ns, "line");
-    line.setAttribute("class", "link " + (l.kind || "imports"));
-    line.setAttribute("x1", a.x);
-    line.setAttribute("y1", a.y);
-    line.setAttribute("x2", b.x);
-    line.setAttribute("y2", b.y);
-    const w = l.kind === "tree" ? 2.2 : Math.min(4, 1.2 + Math.log2((l.weight || 1) + 1));
-    line.setAttribute("stroke-width", w);
-    gRoot.appendChild(line);
-    if (l.kind === "imports") {
-      drawArrowHead(gRoot, ns, a.x, a.y, b.x, b.y, "#f0a030");
-    }
-  });
-
-  nodes.forEach((n) => {
-    const group = document.createElementNS(ns, "g");
-    group.setAttribute("class", "node " + n.kind);
-    group.setAttribute("transform", "translate(" + n.x + "," + n.y + ")");
-    group.style.opacity = n.external ? "0.55" : "1";
-    const c = document.createElementNS(ns, "circle");
-    c.setAttribute("r", n.r);
-    if (n.isCurrent) {
-      c.setAttribute("stroke", "#3d9cf0");
-      c.setAttribute("stroke-width", "3");
-    }
-    const title = document.createElementNS(ns, "title");
-    title.textContent = n.title || n.id;
-    c.appendChild(title);
-    const t = document.createElementNS(ns, "text");
-    t.setAttribute("y", n.r + 12);
-    t.textContent = n.label;
-    group.appendChild(c);
-    group.appendChild(t);
-    group.addEventListener("mousedown", (ev) => startDragNode(ev, n));
-    group.addEventListener("click", () => {
-      if (n._suppressClick) {
-        n._suppressClick = false;
-        return;
-      }
-      if (mode !== "tree" || n.kind !== "folder") return;
-      if (n.id === currentDir) {
-        // click current → show files if any
-        const info = folderInfo(n.id);
-        if (info && (info.files || []).length) showFiles(n.id);
-        return;
-      }
-      const info = folderInfo(n.id);
-      const kids = (info && info.children) || [];
-      const files = (info && info.files) || [];
-      if (kids.length) {
-        showTree(n.id);
-      } else if (files.length) {
-        showFiles(n.id);
-      } else {
-        showTree(n.id);
-      }
-    });
-    gRoot.appendChild(group);
-  });
-}
-
-let dragNode = null;
-let dragStart = null;
-function startDragNode(ev, n) {
-  ev.stopPropagation();
-  dragNode = n;
-  n.fixed = true;
-  dragStart = { x: ev.clientX, y: ev.clientY, moved: false };
-  const onMove = (e) => {
-    if (!dragNode) return;
-    const dx = (e.clientX - dragStart.x) / transform.k;
-    const dy = (e.clientY - dragStart.y) / transform.k;
-    if (Math.abs(e.clientX - dragStart.x) + Math.abs(e.clientY - dragStart.y) > 3) {
-      dragStart.moved = true;
-    }
-    dragNode.x += dx;
-    dragNode.y += dy;
-    dragStart.x = e.clientX;
-    dragStart.y = e.clientY;
-    draw();
-  };
-  const onUp = () => {
-    if (dragNode) {
-      dragNode.fixed = false;
-      if (dragStart && dragStart.moved) dragNode._suppressClick = true;
-    }
-    dragNode = null;
-    window.removeEventListener("mousemove", onMove);
-    window.removeEventListener("mouseup", onUp);
-  };
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-}
-
-let panning = false;
-let pan0 = null;
-svg.addEventListener("mousedown", (ev) => {
-  if (ev.target === svg || (ev.target && ev.target.tagName === "svg")) {
-    panning = true;
-    pan0 = { x: ev.clientX, y: ev.clientY, tx: transform.x, ty: transform.y };
-  }
-});
-window.addEventListener("mousemove", (ev) => {
-  if (!panning || !pan0) return;
-  transform.x = pan0.tx + (ev.clientX - pan0.x);
-  transform.y = pan0.ty + (ev.clientY - pan0.y);
-  draw();
-});
-window.addEventListener("mouseup", () => { panning = false; });
-svg.addEventListener(
-  "wheel",
-  (ev) => {
-    ev.preventDefault();
-    transform.k = Math.min(3, Math.max(0.25, transform.k * (ev.deltaY > 0 ? 0.9 : 1.1)));
-    draw();
-  },
-  { passive: false }
-);
-window.addEventListener("resize", () => { draw(); });
-
-showTree("(root)");
-</script>
+<script type="application/json" id="graph-data">{"repo":"AccurateIC/Agentic-QBMS","commit":"5bc9f66c4533597118a91fd5a16b5663c48e8f20","built_at":"2026-10-13T06:40:55Z","title":"AccurateIC/Agentic-QBMS","nodes":{"README.md":{"lang":"md","kind":"source"},"cmd.md":{"lang":"md","kind":"source"},".gitignore":{"lang":"other","kind":"source"},".github/workflows/argus.yml":{"lang":"yaml","kind":"source"},"agents/README.md":{"lang":"md","kind":"source"},"agents/QC_CHECKLIST.md":{"lang":"md","kind":"source"},"agents/assembly/AGENT.md":{"lang":"md","kind":"source"},"agents/assembly/memory/log.md":{"lang":"md","kind":"source"},"agents/assembly/src/assemble.py":{"lang":"py","kind":"source"},"agents/assembly/src/visual_qa.py":{"lang":"py","kind":"source"},"agents/extraction/AGENT.md":{"lang":"md","kind":"source"},"agents/extraction/memory.md":{"lang":"md","kind":"source"},"agents/extraction/memory/log.md":{"lang":"md","kind":"source"},"agents/extraction/src/extract.py":{"lang":"py","kind":"source"},"agents/ingestion/AGENT.md":{"lang":"md","kind":"source"},"agents/ingestion/memory/log.md":{"lang":"md","kind":"source"},"agents/ingestion/src/ingest.py":{"lang":"py","kind":"source"},"agents/qa_validation/AGENT.md":{"lang":"md","kind":"source"},"agents/qa_validation/memory/log.md":{"lang":"md","kind":"source"},"agents/question_gen/AGENT.md":{"lang":"md","kind":"source"},"agents/question_gen/memory/log.md":{"lang":"md","kind":"source"},"agents/structuring/AGENT.md":{"lang":"md","kind":"source"},"agents/structuring/memory/log.md":{"lang":"md","kind":"source"},"app/requirements.txt":{"lang":"txt","kind":"source"},"app/.env.example":{"lang":"example","kind":"source"},"app/backend/main.py":{"lang":"py","kind":"source"},"app/backend/__init__.py":{"lang":"py","kind":"source"},"app/frontend/index.html":{"lang":"html","kind":"source"},"app/frontend/styles.css":{"lang":"css","kind":"source"},"app/frontend/app.js":{"lang":"js","kind":"source"}},"edges":[{"from":"agents/extraction/src/extract.py","to":"agents/extraction/memory/log.md","via":"ref"},{"from":"agents/extraction/src/extract.py","to":"agents/extraction/memory.md","via":"ref"},{"from":"agents/ingestion/src/ingest.py","to":"agents/ingestion/memory/log.md","via":"ref"},{"from":"app/backend/main.py","to":"app/frontend/index.html","via":"ref"},{"from":"app/backend/main.py","to":"app/backend/__init__.py","via":"ref"},{"from":"app/frontend/index.html","to":"app/frontend/styles.css","via":"ref"},{"from":"app/frontend/index.html","to":"app/frontend/app.js","via":"ref"}],"folders":{"(root)":{"file_count":3,"test_count":0,"files":[".gitignore","README.md","cmd.md"],"children":[".github","agents","app","data"],"parent":null},".github":{"file_count":0,"test_count":0,"files":[],"children":[".github/workflows"],"parent":"(root)"},".github/workflows":{"file_count":1,"test_count":0,"files":[".github/workflows/argus.yml"],"children":[],"parent":".github"},"agents":{"file_count":2,"test_count":0,"files":["agents/QC_CHECKLIST.md","agents/README.md"],"children":["agents/assembly","agents/extraction","agents/ingestion","agents/qa_validation","agents/question_gen","agents/structuring"],"parent":"(root)"},"agents/assembly":{"file_count":1,"test_count":0,"files":["agents/assembly/AGENT.md"],"children":["agents/assembly/memory","agents/assembly/src"],"parent":"agents"},"agents/assembly/memory":{"file_count":1,"test_count":0,"files":["agents/assembly/memory/log.md"],"children":[],"parent":"agents/assembly"},"agents/assembly/src":{"file_count":2,"test_count":0,"files":["agents/assembly/src/assemble.py","agents/assembly/src/visual_qa.py"],"children":[],"parent":"agents/assembly"},"agents/extraction":{"file_count":2,"test_count":0,"files":["agents/extraction/AGENT.md","agents/extraction/memory.md"],"children":["agents/extraction/memory","agents/extraction/src"],"parent":"agents"},"agents/extraction/memory":{"file_count":1,"test_count":0,"files":["agents/extraction/memory/log.md"],"children":[],"parent":"agents/extraction"},"agents/extraction/src":{"file_count":1,"test_count":0,"files":["agents/extraction/src/extract.py"],"children":[],"parent":"agents/extraction"},"agents/ingestion":{"file_count":1,"test_count":0,"files":["agents/ingestion/AGENT.md"],"children":["agents/ingestion/memory","agents/ingestion/src"],"parent":"agents"},"agents/ingestion/memory":{"file_count":1,"test_count":0,"files":["agents/ingestion/memory/log.md"],"children":[],"parent":"agents/ingestion"},"agents/ingestion/src":{"file_count":1,"test_count":0,"files":["agents/ingestion/src/ingest.py"],"children":[],"parent":"agents/ingestion"},"agents/qa_validation":{"file_count":1,"test_count":0,"files":["agents/qa_validation/AGENT.md"],"children":["agents/qa_validation/memory"],"parent":"agents"},"agents/qa_validation/memory":{"file_count":1,"test_count":0,"files":["agents/qa_validation/memory/log.md"],"children":[],"parent":"agents/qa_validation"},"agents/question_gen":{"file_count":1,"test_count":0,"files":["agents/question_gen/AGENT.md"],"children":["agents/question_gen/memory"],"parent":"agents"},"agents/question_gen/memory":{"file_count":1,"test_count":0,"files":["agents/question_gen/memory/log.md"],"children":[],"parent":"agents/question_gen"},"agents/structuring":{"file_count":1,"test_count":0,"files":["agents/structuring/AGENT.md"],"children":["agents/structuring/memory"],"parent":"agents"},"agents/structuring/memory":{"file_count":1,"test_count":0,"files":["agents/structuring/memory/log.md"],"children":[],"parent":"agents/structuring"},"app":{"file_count":2,"test_count":0,"files":["app/.env.example","app/requirements.txt"],"children":["app/backend","app/frontend"],"parent":"(root)"},"app/backend":{"file_count":2,"test_count":0,"files":["app/backend/__init__.py","app/backend/main.py"],"children":[],"parent":"app"},"app/frontend":{"file_count":3,"test_count":0,"files":["app/frontend/app.js","app/frontend/index.html","app/frontend/styles.css"],"children":[],"parent":"app"},"data":{"file_count":0,"test_count":0,"files":[],"children":["data/outputs","data/uploads"],"parent":"(root)"},"data/outputs":{"file_count":0,"test_count":0,"files":[],"children":["data/outputs/32c5a84f-c6ca-4003-a44a-6b2c9770c1c6","data/outputs/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_155112","data/outputs/mlnotes_20260826_130513","data/outputs/science-text-book_20260827_101118","data/outputs/timeseries_20260826_173200"],"parent":"data"},"data/outputs/32c5a84f-c6ca-4003-a44a-6b2c9770c1c6":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/outputs"},"data/outputs/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_155112":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/outputs"},"data/outputs/mlnotes_20260826_130513":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/outputs"},"data/outputs/science-text-book_20260827_101118":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/outputs"},"data/outputs/timeseries_20260826_173200":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/outputs"},"data/uploads":{"file_count":0,"test_count":0,"files":[],"children":["data/uploads/dd13e2f1-f354-4dcd-9363-51db648bc174","data/uploads/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_155112","data/uploads/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_172218","data/uploads/mlnotes_20260826_130513","data/uploads/science-text-book_20260827_101118","data/uploads/timeseries_20260826_173200"],"parent":"data"},"data/uploads/dd13e2f1-f354-4dcd-9363-51db648bc174":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/uploads"},"data/uploads/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_155112":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/uploads"},"data/uploads/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_172218":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/uploads"},"data/uploads/mlnotes_20260826_130513":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/uploads"},"data/uploads/science-text-book_20260827_101118":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/uploads"},"data/uploads/timeseries_20260826_173200":{"file_count":0,"test_count":0,"files":[],"children":[],"parent":"data/uploads"}},"tree_edges":[{"from":"(root)","to":".github","kind":"contains"},{"from":"(root)","to":"agents","kind":"contains"},{"from":"(root)","to":"app","kind":"contains"},{"from":"(root)","to":"data","kind":"contains"},{"from":".github","to":".github/workflows","kind":"contains"},{"from":"agents","to":"agents/assembly","kind":"contains"},{"from":"agents","to":"agents/extraction","kind":"contains"},{"from":"agents","to":"agents/ingestion","kind":"contains"},{"from":"agents","to":"agents/qa_validation","kind":"contains"},{"from":"agents","to":"agents/question_gen","kind":"contains"},{"from":"agents","to":"agents/structuring","kind":"contains"},{"from":"agents/assembly","to":"agents/assembly/memory","kind":"contains"},{"from":"agents/assembly","to":"agents/assembly/src","kind":"contains"},{"from":"agents/extraction","to":"agents/extraction/memory","kind":"contains"},{"from":"agents/extraction","to":"agents/extraction/src","kind":"contains"},{"from":"agents/ingestion","to":"agents/ingestion/memory","kind":"contains"},{"from":"agents/ingestion","to":"agents/ingestion/src","kind":"contains"},{"from":"agents/qa_validation","to":"agents/qa_validation/memory","kind":"contains"},{"from":"agents/question_gen","to":"agents/question_gen/memory","kind":"contains"},{"from":"agents/structuring","to":"agents/structuring/memory","kind":"contains"},{"from":"app","to":"app/backend","kind":"contains"},{"from":"app","to":"app/frontend","kind":"contains"},{"from":"data","to":"data/outputs","kind":"contains"},{"from":"data","to":"data/uploads","kind":"contains"},{"from":"data/outputs","to":"data/outputs/32c5a84f-c6ca-4003-a44a-6b2c9770c1c6","kind":"contains"},{"from":"data/outputs","to":"data/outputs/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_155112","kind":"contains"},{"from":"data/outputs","to":"data/outputs/mlnotes_20260826_130513","kind":"contains"},{"from":"data/outputs","to":"data/outputs/science-text-book_20260827_101118","kind":"contains"},{"from":"data/outputs","to":"data/outputs/timeseries_20260826_173200","kind":"contains"},{"from":"data/uploads","to":"data/uploads/dd13e2f1-f354-4dcd-9363-51db648bc174","kind":"contains"},{"from":"data/uploads","to":"data/uploads/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_155112","kind":"contains"},{"from":"data/uploads","to":"data/uploads/introduction-to-machine-learning-2th-edition-ethem-alpayd-n_20260826_172218","kind":"contains"},{"from":"data/uploads","to":"data/uploads/mlnotes_20260826_130513","kind":"contains"},{"from":"data/uploads","to":"data/uploads/science-text-book_20260827_101118","kind":"contains"},{"from":"data/uploads","to":"data/uploads/timeseries_20260826_173200","kind":"contains"}],"folder_edges":[{"from":"agents/assembly/src","to":"data","weight":2,"kind":"imports"},{"from":"agents/assembly/src","to":"data/outputs","weight":2,"kind":"imports"},{"from":"agents/ingestion/src","to":"agents/ingestion/memory","weight":2,"kind":"imports"},{"from":"agents/extraction/src","to":"agents/extraction/memory","weight":1,"kind":"imports"},{"from":"agents/extraction/src","to":"data","weight":1,"kind":"imports"},{"from":"agents/extraction/src","to":"data/uploads","weight":1,"kind":"imports"},{"from":"app/backend","to":"app/frontend","weight":1,"kind":"imports"},{"from":"app/backend","to":"data","weight":1,"kind":"imports"},{"from":"app/backend","to":"data/outputs","weight":1,"kind":"imports"},{"from":"app/backend","to":"data/uploads","weight":1,"kind":"imports"}],"handoff_groups":{"agents":["agents/ingestion","agents/extraction","agents/structuring","agents/question_gen","agents/qa_validation","agents/assembly"]},"flowchart":{"nodes":[{"id":"agents/ingestion","label":"ingestion/","kind":"stage","col":2,"row":0.0,"w":168,"h":36,"stage_num":1,"x":602.0,"y":120.0},{"id":"agents/extraction","label":"extraction/","kind":"stage","col":2,"row":1.0,"w":168,"h":36,"stage_num":2,"x":602.0,"y":178.0},{"id":"agents/structuring","label":"structuring/","kind":"stage","col":2,"row":2.0,"w":168,"h":36,"stage_num":3,"x":602.0,"y":236.0},{"id":"agents/question_gen","label":"question_gen/","kind":"stage","col":2,"row":3.0,"w":168,"h":36,"stage_num":4,"x":602.0,"y":294.0},{"id":"agents/qa_validation","label":"qa_validation/","kind":"stage","col":2,"row":4.0,"w":168,"h":36,"stage_num":5,"x":602.0,"y":352.0},{"id":"agents/assembly","label":"assembly/","kind":"stage","col":2,"row":5.0,"w":168,"h":36,"stage_num":6,"x":602.0,"y":410.0},{"id":"agents/QC_CHECKLIST.md","label":"QC_CHECKLIST.md","kind":"file","col":2,"row":6.0,"w":158,"h":36,"stage_num":null,"x":607.0,"y":468.0},{"id":"agents/README.md","label":"README.md","kind":"file","col":2,"row":7.0,"w":158,"h":36,"stage_num":null,"x":607.0,"y":526.0},{"id":"agents/extraction/memory","label":"memory/","kind":"folder","col":3,"row":1.0,"w":158,"h":36,"stage_num":null,"x":866.0,"y":178.0},{"id":"agents/extraction/src","label":"src/","kind":"folder","col":3,"row":2.0,"w":158,"h":36,"stage_num":null,"x":866.0,"y":236.0},{"id":"agents/extraction/AGENT.md","label":"AGENT.md","kind":"file","col":3,"row":3.0,"w":158,"h":36,"stage_num":null,"x":866.0,"y":294.0},{"id":"agents/extraction/memory.md","label":"memory.md","kind":"file","col":3,"row":4.0,"w":158,"h":36,"stage_num":null,"x":866.0,"y":352.0},{"id":"(root)","label":"AccurateIC/Agentic-QBMS","kind":"repo","col":0,"row":2.5,"w":220,"h":68,"stage_num":null,"x":32.0,"y":249.0,"subtitle":"@5bc9f66 · 30 files · 35 folders"},{"id":"agents","label":"agents/","kind":"folder","col":1,"row":2.5,"w":158,"h":36,"stage_num":null,"x":348.0,"y":265.0},{"id":".github","label":".github/","kind":"folder","col":1,"row":3.5,"w":158,"h":36,"stage_num":null,"x":348.0,"y":323.0},{"id":"app","label":"app/","kind":"folder","col":1,"row":4.5,"w":158,"h":36,"stage_num":null,"x":348.0,"y":381.0},{"id":"data","label":"data/","kind":"folder","col":1,"row":5.5,"w":158,"h":36,"stage_num":null,"x":348.0,"y":439.0},{"id":".gitignore","label":".gitignore","kind":"file","col":1,"row":6.5,"w":158,"h":36,"stage_num":null,"x":348.0,"y":497.0},{"id":"README.md","label":"README.md","kind":"file","col":1,"row":7.5,"w":158,"h":36,"stage_num":null,"x":348.0,"y":555.0},{"id":"cmd.md","label":"cmd.md","kind":"file","col":1,"row":8.5,"w":158,"h":36,"stage_num":null,"x":348.0,"y":613.0}],"edges":[{"from":"agents","to":"agents/ingestion","kind":"contains"},{"from":"agents","to":"agents/extraction","kind":"contains"},{"from":"agents","to":"agents/structuring","kind":"contains"},{"from":"agents","to":"agents/question_gen","kind":"contains"},{"from":"agents","to":"agents/qa_validation","kind":"contains"},{"from":"agents","to":"agents/assembly","kind":"contains"},{"from":"agents","to":"agents/QC_CHECKLIST.md","kind":"contains"},{"from":"agents","to":"agents/README.md","kind":"contains"},{"from":"agents/extraction","to":"agents/extraction/memory","kind":"contains"},{"from":"agents/extraction","to":"agents/extraction/src","kind":"contains"},{"from":"agents/extraction","to":"agents/extraction/AGENT.md","kind":"contains"},{"from":"agents/extraction","to":"agents/extraction/memory.md","kind":"contains"},{"from":"(root)","to":".github","kind":"contains"},{"from":"(root)","to":"app","kind":"contains"},{"from":"(root)","to":"data","kind":"contains"},{"from":"(root)","to":".gitignore","kind":"contains"},{"from":"(root)","to":"README.md","kind":"contains"},{"from":"(root)","to":"cmd.md","kind":"contains"},{"from":"(root)","to":"agents","kind":"contains"},{"from":"agents/ingestion","to":"agents/extraction","kind":"handoff","route":"right"},{"from":"agents/extraction","to":"agents/structuring","kind":"handoff","route":"right"},{"from":"agents/structuring","to":"agents/question_gen","kind":"handoff","route":"right"},{"from":"agents/question_gen","to":"agents/qa_validation","kind":"handoff","route":"right"},{"from":"agents/qa_validation","to":"agents/assembly","kind":"handoff","route":"right"},{"from":"agents","to":"data","kind":"uses","weight":6,"route":"below"},{"from":"app","to":"data","kind":"uses","weight":3,"route":"below"}],"expanded":"agents/extraction"},"languages":["css","example","html","js","md","other","py","txt","yaml"],"stats":{"files":30,"edges":7,"folders":36}}</script>
 </body>
 </html>

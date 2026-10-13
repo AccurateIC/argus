@@ -1,538 +1,505 @@
-"""Emit one self-contained interactive HTML dependency diagram (repo tree)."""
+"""Emit one self-contained static HTML flowchart (polished repo overview)."""
 
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .aggregate import aggregate_folders
+from .flowchart import build_flowchart
 
 if TYPE_CHECKING:
     from .scan import FileGraph
 
-_HTML_TEMPLATE = r"""<!DOCTYPE html>
+
+def _escape(s: str) -> str:
+    return html.escape(s or "", quote=True)
+
+
+def _svg_arrow_marker(mid: str, color: str, *, size: float = 10) -> str:
+    # refX sits just before tip so the tip lands on the path end
+    h = size * 0.8
+    return (
+        f'<marker id="{mid}" markerWidth="{size}" markerHeight="{h}" '
+        f'refX="{size - 1}" refY="{h / 2}" orient="auto" markerUnits="userSpaceOnUse">'
+        f'<path d="M0,0 L{size},{h / 2} L0,{h} Z" fill="{color}"/>'
+        f"</marker>"
+    )
+
+
+def _icon_folder(x: float, y: float, color: str) -> str:
+    # Simple folder glyph
+    return (
+        f'<path d="M{x:.1f},{y + 4:.1f} h6 l2,3 h10 v11 h-18 z" '
+        f'fill="none" stroke="{color}" stroke-width="1.4" stroke-linejoin="round"/>'
+    )
+
+
+def _icon_file(x: float, y: float, color: str) -> str:
+    return (
+        f'<path d="M{x + 3:.1f},{y:.1f} h8 l5,5 v12 h-13 z" '
+        f'fill="none" stroke="{color}" stroke-width="1.4" stroke-linejoin="round"/>'
+        f'<path d="M{x + 11:.1f},{y:.1f} v5 h5" fill="none" stroke="{color}" stroke-width="1.4"/>'
+    )
+
+
+def _icon_branch(x: float, y: float, color: str) -> str:
+    return (
+        f'<circle cx="{x + 4:.1f}" cy="{y + 4:.1f}" r="2.5" fill="none" stroke="{color}" stroke-width="1.3"/>'
+        f'<circle cx="{x + 4:.1f}" cy="{y + 16:.1f}" r="2.5" fill="none" stroke="{color}" stroke-width="1.3"/>'
+        f'<circle cx="{x + 14:.1f}" cy="{y + 10:.1f}" r="2.5" fill="none" stroke="{color}" stroke-width="1.3"/>'
+        f'<path d="M{x + 4:.1f},{y + 6.5:.1f} V{y + 13.5:.1f} M{x + 4:.1f},{y + 10:.1f} H{x + 11.5:.1f}" '
+        f'fill="none" stroke="{color}" stroke-width="1.3"/>'
+    )
+
+
+def _ortho_contains(a: dict, b: dict, rail_x: float | None) -> str:
+    ax = a["x"] + a["w"]
+    ay = a["y"] + a["h"] / 2
+    bx = b["x"]
+    by = b["y"] + b["h"] / 2
+    if rail_x is None:
+        rail_x = (ax + bx) / 2
+    return f"M{ax:.1f},{ay:.1f} H{rail_x:.1f} V{by:.1f} H{bx:.1f}"
+
+
+def _ortho_handoff(a: dict, b: dict) -> str:
+    """Box-to-box handoff: bottom-center of A → tip just above top of B."""
+    ax = a["x"] + a["w"] / 2
+    ay = a["y"] + a["h"]  # bottom edge of A
+    bx = b["x"] + b["w"] / 2
+    # stop a few px above B so the arrow tip kisses the box (drawn after nodes)
+    by = b["y"] - 1
+    if abs(ax - bx) < 0.5:
+        return f"M{ax:.1f},{ay:.1f} V{by:.1f}"
+    mid_y = (ay + by) / 2
+    return f"M{ax:.1f},{ay:.1f} V{mid_y:.1f} H{bx:.1f} V{by:.1f}"
+
+
+def _ortho_uses_below(a: dict, b: dict, floor_y: float) -> str:
+    ax = a["x"] + a["w"] / 2
+    ay = a["y"] + a["h"]
+    bx = b["x"] + b["w"] / 2
+    by = b["y"] + b["h"]
+    return f"M{ax:.1f},{ay:.1f} V{floor_y:.1f} H{bx:.1f} V{by:.1f}"
+
+
+def _render_node(n: dict, colors: dict) -> str:
+    kind = n["kind"]
+    x, y, w, h = n["x"], n["y"], n["w"], n["h"]
+    label = n["label"]
+    parts: list[str] = ["<g>"]
+
+    if kind == "repo":
+        fill, stroke = colors["repo_fill"], colors["repo_stroke"]
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w}" height="{h}" rx="10" ry="10" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.6"/>'
+        )
+        parts.append(_icon_branch(x + 12, y + 24, colors["accent"]))
+        # Title + subtitle lines
+        title = label
+        if len(title) > 26:
+            title = title[:25] + "…"
+        meta = n.get("subtitle") or ""
+        parts.append(
+            f'<text x="{x + 36:.1f}" y="{y + 28:.1f}" fill="{colors["text"]}" '
+            f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600">'
+            f"{_escape(title)}</text>"
+        )
+        if meta:
+            parts.append(
+                f'<text x="{x + 36:.1f}" y="{y + 48:.1f}" fill="{colors["muted"]}" '
+                f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">'
+                f"{_escape(meta)}</text>"
+            )
+    elif kind == "stage":
+        fill, stroke = colors["stage_fill"], colors["stage_stroke"]
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w}" height="{h}" rx="8" ry="8" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.4"/>'
+        )
+        num = n.get("stage_num") or 1
+        cx, cy = x + 18, y + h / 2
+        parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="10" fill="{colors["stage_badge"]}" '
+            f'stroke="{colors["stage_stroke"]}" stroke-width="1.2"/>'
+        )
+        parts.append(
+            f'<text x="{cx:.1f}" y="{cy + 4:.1f}" text-anchor="middle" fill="#fff" '
+            f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700">'
+            f"{int(num)}</text>"
+        )
+        max_chars = max(10, int((w - 40) / 7.5))
+        text = label if len(label) <= max_chars else label[: max_chars - 1] + "…"
+        parts.append(
+            f'<text x="{x + 36:.1f}" y="{y + h / 2 + 4:.1f}" fill="#fff" '
+            f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600">'
+            f"{_escape(text)}</text>"
+        )
+    elif kind == "file":
+        fill, stroke = colors["file_fill"], colors["file_stroke"]
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w}" height="{h}" rx="8" ry="8" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.4"/>'
+        )
+        parts.append(_icon_file(x + 10, y + 8, colors["file_icon"]))
+        max_chars = max(10, int((w - 36) / 7.5))
+        text = label if len(label) <= max_chars else label[: max_chars - 1] + "…"
+        parts.append(
+            f'<text x="{x + 34:.1f}" y="{y + h / 2 + 4:.1f}" fill="{colors["text"]}" '
+            f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">'
+            f"{_escape(text)}</text>"
+        )
+    else:  # folder
+        fill, stroke = colors["folder_fill"], colors["folder_stroke"]
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w}" height="{h}" rx="8" ry="8" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.4"/>'
+        )
+        parts.append(_icon_folder(x + 10, y + 8, colors["folder_icon"]))
+        max_chars = max(10, int((w - 36) / 7.5))
+        text = label if len(label) <= max_chars else label[: max_chars - 1] + "…"
+        parts.append(
+            f'<text x="{x + 34:.1f}" y="{y + h / 2 + 4:.1f}" fill="{colors["text"]}" '
+            f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5">'
+            f"{_escape(text)}</text>"
+        )
+
+    parts.append(f'<title>{_escape(n["id"])}</title></g>')
+    return "".join(parts)
+
+
+def _legend_bar(
+    x: float,
+    y: float,
+    width: float,
+    colors: dict,
+) -> str:
+    """Five-column legend matching the reference UX."""
+    font = 'font-family="Segoe UI, Helvetica, Arial, sans-serif"'
+    h = 88
+    pad = 16
+    parts = [
+        f'<g class="legend">'
+        f'<rect x="{x:.1f}" y="{y:.1f}" width="{width:.1f}" height="{h}" rx="10" '
+        f'fill="{colors["panel"]}" stroke="{colors["panel_stroke"]}" stroke-width="1.2"/>'
+        f'<text x="{x + pad:.1f}" y="{y + 22:.1f}" fill="{colors["text"]}" {font} '
+        f'font-size="14" font-weight="700">How to read this graph</text>'
+    ]
+
+    # Five equal columns under the title
+    cols = 5
+    inner_x = x + pad
+    inner_w = width - pad * 2
+    col_w = inner_w / cols
+    cy = y + 52  # icon vertical center
+    text_y1 = y + 46
+    text_y2 = y + 62
+
+    def divider(i: int) -> None:
+        if i <= 0:
+            return
+        dx = inner_x + i * col_w
+        parts.append(
+            f'<line x1="{dx:.1f}" y1="{y + 32:.1f}" x2="{dx:.1f}" y2="{y + h - 12:.1f}" '
+            f'stroke="{colors["panel_stroke"]}" stroke-width="1"/>'
+        )
+
+    # --- Col 0: Folder ---
+    divider(0)
+    cx0 = inner_x + 14
+    parts.append(_icon_folder_filled(cx0, cy - 8, "#3b82f6"))
+    tx = inner_x + 36
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y1:.1f}" fill="{colors["text"]}" {font} '
+        f'font-size="12" font-weight="700">Folder:</text>'
+    )
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y2:.1f}" fill="{colors["muted"]}" {font} font-size="11">'
+        f"holds files or other folders.</text>"
+    )
+
+    # --- Col 1: File ---
+    divider(1)
+    cx1 = inner_x + col_w + 14
+    parts.append(_icon_file_filled(cx1, cy - 10, "#10b981"))
+    tx = inner_x + col_w + 36
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y1:.1f}" fill="{colors["text"]}" {font} '
+        f'font-size="12" font-weight="700">File:</text>'
+    )
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y2:.1f}" fill="{colors["muted"]}" {font} font-size="11">'
+        f"a document or code file.</text>"
+    )
+
+    # --- Col 2: Contains ---
+    divider(2)
+    cx2 = inner_x + 2 * col_w + 14
+    parts.append(
+        f'<line x1="{cx2:.1f}" y1="{cy:.1f}" x2="{cx2 + 22:.1f}" y2="{cy:.1f}" '
+        f'stroke="{colors["contains"]}" stroke-width="2.2" marker-end="url(#arrow-contains)"/>'
+    )
+    tx = inner_x + 2 * col_w + 44
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y1:.1f}" fill="{colors["text"]}" {font} '
+        f'font-size="12" font-weight="700">Contains:</text>'
+    )
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y2:.1f}" fill="{colors["muted"]}" {font} font-size="11">'
+        f"folder → what’s inside it.</text>"
+    )
+
+    # --- Col 3: Pipeline order (1 ↓ 2) ---
+    divider(3)
+    cx3 = inner_x + 3 * col_w + 16
+    parts.append(
+        f'<circle cx="{cx3:.1f}" cy="{cy - 11:.1f}" r="7" fill="#8b5cf6" stroke="#a78bfa"/>'
+    )
+    parts.append(
+        f'<text x="{cx3:.1f}" y="{cy - 7.5:.1f}" text-anchor="middle" fill="#fff" '
+        f'{font} font-size="9" font-weight="700">1</text>'
+    )
+    parts.append(
+        f'<line x1="{cx3:.1f}" y1="{cy - 3:.1f}" x2="{cx3:.1f}" y2="{cy + 4:.1f}" '
+        f'stroke="#8b5cf6" stroke-width="2" marker-end="url(#arrow-handoff)"/>'
+    )
+    parts.append(
+        f'<circle cx="{cx3:.1f}" cy="{cy + 12:.1f}" r="7" fill="#8b5cf6" stroke="#a78bfa"/>'
+    )
+    parts.append(
+        f'<text x="{cx3:.1f}" y="{cy + 15.5:.1f}" text-anchor="middle" fill="#fff" '
+        f'{font} font-size="9" font-weight="700">2</text>'
+    )
+    tx = inner_x + 3 * col_w + 32
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y1:.1f}" fill="{colors["text"]}" {font} '
+        f'font-size="12" font-weight="700">Pipeline order:</text>'
+    )
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y2:.1f}" fill="{colors["muted"]}" {font} font-size="11">'
+        f"step 1 runs before step 2.</text>"
+    )
+
+    # --- Col 4: Uses / imports ---
+    divider(4)
+    cx4 = inner_x + 4 * col_w + 14
+    parts.append(
+        f'<line x1="{cx4:.1f}" y1="{cy:.1f}" x2="{cx4 + 22:.1f}" y2="{cy:.1f}" '
+        f'stroke="{colors["uses"]}" stroke-width="2.2" stroke-dasharray="5 3" '
+        f'marker-end="url(#arrow-uses)"/>'
+    )
+    tx = inner_x + 4 * col_w + 44
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y1:.1f}" fill="{colors["text"]}" {font} '
+        f'font-size="12" font-weight="700">Uses / imports:</text>'
+    )
+    parts.append(
+        f'<text x="{tx:.1f}" y="{text_y2:.1f}" fill="{colors["muted"]}" {font} font-size="11">'
+        f"one part depends on another.</text>"
+    )
+
+    parts.append("</g>")
+    return "".join(parts)
+
+
+def _icon_folder_filled(x: float, y: float, color: str) -> str:
+    return (
+        f'<path d="M{x:.1f},{y + 5:.1f} h7 l2.5,3 h11.5 v10 h-21 z" '
+        f'fill="{color}" stroke="{color}" stroke-width="0.5" stroke-linejoin="round"/>'
+    )
+
+
+def _icon_file_filled(x: float, y: float, color: str) -> str:
+    return (
+        f'<path d="M{x + 2:.1f},{y:.1f} h9 l5,5 v13 h-14 z" '
+        f'fill="none" stroke="{color}" stroke-width="1.6" stroke-linejoin="round"/>'
+        f'<path d="M{x + 11:.1f},{y:.1f} v5 h5" fill="none" stroke="{color}" stroke-width="1.6"/>'
+        f'<path d="M{x + 5:.1f},{y + 11:.1f} h8 M{x + 5:.1f},{y + 14.5:.1f} h8 '
+        f'M{x + 5:.1f},{y + 18:.1f} h5" stroke="{color}" stroke-width="1.2"/>'
+    )
+
+
+def _render_svg(scene: dict) -> str:
+    by_id = {n["id"]: n for n in scene["nodes"]}
+    meta = scene.get("meta") or {}
+    rails = {int(k): float(v) for k, v in (scene.get("rails") or {}).items()}
+
+    colors = {
+        "bg": "#0b1220",
+        "panel": "#121a2b",
+        "panel_stroke": "#2a3650",
+        "text": "#e8eef8",
+        "muted": "#8b9bb4",
+        "accent": "#5b9fd4",
+        "repo_fill": "#152033",
+        "repo_stroke": "#3d5a80",
+        "folder_fill": "#132033",
+        "folder_stroke": "#3b82c4",
+        "folder_icon": "#5ba3e0",
+        "file_fill": "#0f2420",
+        "file_stroke": "#2dd4a8",
+        "file_icon": "#3ecf8e",
+        "stage_fill": "#4c3db8",
+        "stage_stroke": "#8b7cf7",
+        "stage_badge": "#3d2fa0",
+        "contains": "#c5d0e0",
+        "handoff": "#8b7cf7",
+        "uses": "#5b9fd4",
+    }
+
+    # Enrich root node subtitle
+    for n in scene["nodes"]:
+        if n["kind"] == "repo":
+            bits = []
+            if meta.get("commit"):
+                bits.append("@" + str(meta["commit"]))
+            bits.append(f"{meta.get('files', 0)} files")
+            bits.append(f"{meta.get('folders', 0)} folders")
+            n["subtitle"] = " · ".join(bits)
+
+    # Shift tall root so its vertical center matches its row mid
+    for n in scene["nodes"]:
+        if n["kind"] == "repo":
+            # flowchart used NODE_H-based row; nudge so midlines align
+            from .flowchart import NODE_H, ROOT_H
+
+            n["y"] = n["y"] - (ROOT_H - NODE_H) / 2
+
+    width = max(int(scene["width"]), 900)
+    # Extra room for header text + bottom legend
+    header_h = 56
+    legend_h = 100
+    body_bottom = 0.0
+    if scene["nodes"]:
+        body_bottom = max(n["y"] + n["h"] for n in scene["nodes"])
+    floor_y = body_bottom + 36
+    height = int(max(scene["height"], floor_y + legend_h + 28))
+
+    # Bump all node Y down for in-SVG title
+    dy = header_h
+    for n in scene["nodes"]:
+        n["y"] += dy
+    floor_y += dy
+    height += dy
+
+    parts: list[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="Argus Repository Dependency Graph">',
+        f'<rect width="100%" height="100%" fill="{colors["bg"]}"/>',
+        "<defs>",
+        _svg_arrow_marker("arrow-contains", colors["contains"], size=9),
+        _svg_arrow_marker("arrow-handoff", colors["handoff"], size=6),
+        _svg_arrow_marker("arrow-uses", colors["uses"], size=9),
+        "</defs>",
+    ]
+
+    # Header
+    repo = meta.get("repo") or "local"
+    commit = meta.get("commit") or ""
+    parts.append(
+        f'<text x="28" y="28" fill="{colors["text"]}" '
+        f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" font-weight="700">'
+        f"Argus Repository Dependency Graph</text>"
+    )
+    meta_line = "  ·  ".join(
+        x
+        for x in [
+            f"Repository: {repo}",
+            f"Commit: {commit}" if commit else "",
+            f"Files: {meta.get('files', 0)}",
+            f"File-links: {meta.get('file_links', 0)}",
+            f"Folders: {meta.get('folders', 0)}",
+            "static flowchart",
+        ]
+        if x
+    )
+    parts.append(
+        f'<text x="28" y="48" fill="{colors["muted"]}" '
+        f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">'
+        f"{_escape(meta_line)}</text>"
+    )
+
+    def _draw_edge(e: dict) -> None:
+        a = by_id.get(e["from"])
+        b = by_id.get(e["to"])
+        if not a or not b:
+            return
+        kind = e.get("kind") or "contains"
+        if kind == "handoff":
+            stroke, marker, width_s, dash = colors["handoff"], "arrow-handoff", 2.6, ""
+            d = _ortho_handoff(a, b)
+        elif kind == "uses":
+            stroke, marker, width_s, dash = (
+                colors["uses"],
+                "arrow-uses",
+                1.8,
+                ' stroke-dasharray="6 4"',
+            )
+            d = _ortho_uses_below(a, b, floor_y)
+        else:
+            stroke, marker, width_s, dash = colors["contains"], "arrow-contains", 1.6, ""
+            rail = (a["x"] + a["w"] + b["x"]) / 2
+            d = _ortho_contains(a, b, rail)
+        parts.append(
+            f'<path d="{d}" fill="none" stroke="{stroke}" stroke-width="{width_s}"'
+            f'{dash} marker-end="url(#{marker})"/>'
+        )
+
+    # Contains + uses under nodes; handoff on top so shafts stay visible box→box
+    for e in scene["edges"]:
+        if e.get("kind") != "handoff":
+            _draw_edge(e)
+
+    for n in scene["nodes"]:
+        parts.append(_render_node(n, colors))
+
+    for e in scene["edges"]:
+        if e.get("kind") == "handoff":
+            _draw_edge(e)
+
+    # Note
+    if scene.get("note"):
+        parts.append(
+            f'<text x="28" y="{floor_y - 10:.1f}" fill="{colors["muted"]}" '
+            f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">'
+            f'{_escape(scene["note"])}</text>'
+        )
+
+    # Bottom legend bar
+    legend_y = height - 96
+    parts.append(_legend_bar(24, legend_y, width - 48, colors))
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+_HTML_SHELL = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Argus dependency graph — __TITLE__</title>
+<title>Argus Repository Dependency Graph — __TITLE__</title>
 <style>
-  :root {
-    --bg: #0f1419;
-    --panel: #1a2332;
-    --text: #e7ecf3;
-    --muted: #8b9bb4;
-    --accent: #3d9cf0;
-    --folder: #5b8def;
-    --file: #3ecf8e;
-    --test: #e6a23c;
-    --edge-tree: #6b7c93;
-    --edge-dep: #f0a030;
-    --ext: #7a8699;
-  }
+  :root { --bg: #0b1220; --text: #e8eef8; }
   * { box-sizing: border-box; }
   body {
-    margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
-    background: var(--bg); color: var(--text); height: 100vh;
-    display: flex; flex-direction: column;
+    margin: 0; font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
   }
-  header {
-    padding: 10px 16px; background: var(--panel);
-    border-bottom: 1px solid #2a3548;
-    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-  }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
-  header .meta { color: var(--muted); font-size: 12px; }
-  #toolbar { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
-  button {
-    background: #243044; color: var(--text); border: 1px solid #3a4a63;
-    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
-  }
-  button:hover { background: #2d3c54; }
-  button:disabled { opacity: 0.4; cursor: default; }
-  #breadcrumb { font-size: 13px; color: var(--muted); width: 100%; }
-  #breadcrumb strong { color: var(--accent); }
-  #stage { flex: 1; position: relative; overflow: hidden; }
-  svg { width: 100%; height: 100%; display: block; cursor: grab; }
-  svg:active { cursor: grabbing; }
-  .node circle { stroke: #0f1419; stroke-width: 2; cursor: pointer; }
-  .node.folder circle { fill: var(--folder); }
-  .node.file circle { fill: var(--file); }
-  .node.test circle { fill: var(--test); }
-  .node.external circle { fill: var(--ext); }
-  .node text {
-    fill: var(--text); font-size: 11px; pointer-events: none;
-    text-anchor: middle; paint-order: stroke; stroke: var(--bg); stroke-width: 3px;
-  }
-  .link.tree { stroke: var(--edge-tree); stroke-opacity: 0.9; fill: none; }
-  .link.imports { stroke: var(--edge-dep); stroke-opacity: 0.95; fill: none; stroke-dasharray: 6 4; }
-  .hint {
-    position: absolute; bottom: 12px; left: 12px; right: 12px;
-    color: var(--muted); font-size: 12px; pointer-events: none;
-  }
-  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
-  .legend span::before {
-    content: ""; display: inline-block; width: 8px; height: 8px;
-    border-radius: 50%; margin-right: 4px; vertical-align: middle;
-  }
-  .legend .l-folder::before { background: var(--folder); }
-  .legend .l-file::before { background: var(--file); }
-  .legend .l-test::before { background: var(--test); }
-  .legend .l-ext::before { background: var(--ext); }
-  .legend .l-tree::before { background: var(--edge-tree); border-radius: 0; height: 2px; width: 14px; vertical-align: middle; }
-  .legend .l-dep::before { background: var(--edge-dep); border-radius: 0; height: 2px; width: 14px; vertical-align: middle; }
+  #wrap { padding: 8px 12px 20px; overflow: auto; }
+  #wrap svg { display: block; margin: 0 auto; max-width: none; }
 </style>
 </head>
 <body>
-<header>
-  <h1>Argus dependency graph</h1>
-  <div class="meta" id="meta"></div>
-  <div id="toolbar">
-    <div class="legend">
-      <span class="l-folder">folder</span>
-      <span class="l-file">file</span>
-      <span class="l-test">test</span>
-      <span class="l-ext">outside</span>
-      <span class="l-tree">tree (contains)</span>
-      <span class="l-dep">imports / uses</span>
-    </div>
-    <button type="button" id="btnFiles" disabled>Show files</button>
-    <button type="button" id="btnBack" disabled>← Up</button>
-  </div>
-  <div id="breadcrumb">View: <strong>(root)</strong> — click a folder to open it</div>
-</header>
-<div id="stage">
-  <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
-  <div class="hint" id="hint">Grey lines = folder tree · Orange dashed = imports · Click folder to drill in · Show files for file relationships</div>
+<div id="wrap">
+__SVG__
 </div>
-<script>
-const DATA = __DATA__;
-
-const svg = document.getElementById("canvas");
-const btnBack = document.getElementById("btnBack");
-const btnFiles = document.getElementById("btnFiles");
-const breadcrumb = document.getElementById("breadcrumb");
-const metaEl = document.getElementById("meta");
-
-metaEl.textContent = [
-  DATA.repo || "local",
-  DATA.commit ? ("@" + DATA.commit.slice(0, 7)) : "",
-  (DATA.stats && DATA.stats.files) ? (DATA.stats.files + " files") : "",
-  (DATA.stats && DATA.stats.edges) ? (DATA.stats.edges + " file-links") : "",
-  (DATA.stats && DATA.stats.folders) ? (DATA.stats.folders + " folders") : "",
-  (DATA.languages && DATA.languages.length) ? DATA.languages.slice(0, 8).join("/") : "",
-].filter(Boolean).join(" · ");
-
-let mode = "tree"; // tree | files
-let currentDir = "(root)";
-let nodes = [];
-let links = [];
-let transform = { x: 0, y: 0, k: 1 };
-let simTimer = null;
-
-function shortLabel(id, max) {
-  max = max || 28;
-  if (!id) return "";
-  if (id === "(root)") return "(root)";
-  const base = id.split("/").pop();
-  if (base.length <= max) return base;
-  return base.slice(0, max - 1) + "…";
-}
-
-function folderInfo(id) {
-  return (DATA.folders && DATA.folders[id]) || null;
-}
-
-function buildTreeScene(dirId) {
-  const folders = DATA.folders || {};
-  const info = folders[dirId] || { children: [], files: [] };
-  const childIds = info.children || [];
-  const nodeMap = {};
-
-  // Center node = current directory
-  nodeMap[dirId] = {
-    id: dirId,
-    label: shortLabel(dirId, 40),
-    kind: "folder",
-    title: dirId + " (current)",
-    r: 16,
-    isCurrent: true,
-  };
-
-  childIds.forEach((cid) => {
-    const c = folders[cid] || {};
-    nodeMap[cid] = {
-      id: cid,
-      label: shortLabel(cid, 36),
-      kind: "folder",
-      title: cid + " — " + (c.file_count || 0) + " files, " + ((c.children || []).length) + " subfolders",
-      r: 12 + Math.min(10, Math.sqrt((c.file_count || 1))),
-      isCurrent: false,
-    };
-  });
-
-  nodes = Object.values(nodeMap);
-  const idset = new Set(nodes.map((n) => n.id));
-
-  // Tree edges: current → each child
-  links = childIds.map((cid) => ({
-    source: dirId,
-    target: cid,
-    weight: 2,
-    kind: "tree",
-  }));
-
-  // Import edges among visible folders (children + current)
-  (DATA.folder_edges || []).forEach((e) => {
-    if (idset.has(e.from) && idset.has(e.to) && e.from !== e.to) {
-      links.push({
-        source: e.from,
-        target: e.to,
-        weight: e.weight || 1,
-        kind: "imports",
-      });
-    }
-  });
-}
-
-function buildFileScene(folderId) {
-  const folders = DATA.folders || {};
-  const info = folders[folderId] || { files: [] };
-  const fileSet = new Set(info.files || []);
-  const nodeMap = {};
-
-  (info.files || []).forEach((p) => {
-    const meta = (DATA.nodes && DATA.nodes[p]) || {};
-    nodeMap[p] = {
-      id: p,
-      label: shortLabel(p, 40),
-      kind: meta.kind === "test" ? "test" : "file",
-      title: p + (meta.lang ? " [" + meta.lang + "]" : ""),
-      r: 10,
-      external: false,
-    };
-  });
-
-  const fileEdges = (DATA.edges || []).filter(
-    (e) => fileSet.has(e.from) || fileSet.has(e.to)
-  );
-  fileEdges.forEach((e) => {
-    [e.from, e.to].forEach((p) => {
-      if (!nodeMap[p]) {
-        nodeMap[p] = {
-          id: p,
-          label: shortLabel(p, 40),
-          kind: "external",
-          title: p + " (outside " + folderId + ")",
-          r: 9,
-          external: true,
-        };
-      }
-    });
-  });
-
-  nodes = Object.values(nodeMap);
-  links = fileEdges.map((e) => ({
-    source: e.from,
-    target: e.to,
-    weight: 1,
-    kind: "imports",
-  }));
-}
-
-function updateChrome() {
-  const info = folderInfo(currentDir) || {};
-  const nFiles = (info.files || []).length;
-  const nKids = (info.children || []).length;
-  if (mode === "tree") {
-    breadcrumb.innerHTML =
-      "Folder tree at <strong>" + currentDir + "</strong> — " +
-      nKids + " subfolders · " + nFiles + " files here · grey=contains · orange dashed=imports";
-    btnFiles.disabled = nFiles === 0;
-    btnBack.disabled = currentDir === "(root)";
-  } else {
-    breadcrumb.innerHTML =
-      "Files in <strong>" + currentDir + "</strong> — orange arrows = imports/uses · dim = outside folder";
-    btnFiles.disabled = true;
-    btnBack.disabled = false;
-  }
-}
-
-function showTree(dirId) {
-  mode = "tree";
-  currentDir = dirId || "(root)";
-  buildTreeScene(currentDir);
-  updateChrome();
-  restartSim(true);
-}
-
-function showFiles(folderId) {
-  mode = "files";
-  currentDir = folderId || currentDir;
-  buildFileScene(currentDir);
-  updateChrome();
-  restartSim(false);
-}
-
-btnBack.addEventListener("click", () => {
-  if (mode === "files") {
-    showTree(currentDir);
-    return;
-  }
-  const info = folderInfo(currentDir);
-  const parent = (info && info.parent != null) ? info.parent : "(root)";
-  showTree(parent || "(root)");
-});
-
-btnFiles.addEventListener("click", () => {
-  showFiles(currentDir);
-});
-
-function restartSim(treeLayout) {
-  const W = svg.clientWidth || 900;
-  const H = svg.clientHeight || 600;
-  const cx = W / 2;
-  const cy = H / 2;
-
-  if (treeLayout && mode === "tree" && nodes.length) {
-    // Hierarchical: current at top, children in a row below
-    const cur = nodes.find((n) => n.isCurrent) || nodes[0];
-    const kids = nodes.filter((n) => !n.isCurrent);
-    cur.x = cx;
-    cur.y = H * 0.22;
-    cur.vx = 0; cur.vy = 0;
-    kids.forEach((n, i) => {
-      const span = Math.min(W * 0.8, Math.max(200, kids.length * 90));
-      n.x = cx - span / 2 + (kids.length === 1 ? span / 2 : (i * span) / (kids.length - 1));
-      n.y = H * 0.55;
-      n.vx = 0; n.vy = 0;
-    });
-  } else {
-    const n = nodes.length || 1;
-    nodes.forEach((node, i) => {
-      const angle = (2 * Math.PI * i) / n - Math.PI / 2;
-      const rad = Math.min(W, H) * 0.28;
-      node.x = cx + Math.cos(angle) * rad;
-      node.y = cy + Math.sin(angle) * rad;
-      node.vx = 0;
-      node.vy = 0;
-    });
-  }
-
-  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
-  links.forEach((l) => {
-    l.sourceNode = byId[l.source];
-    l.targetNode = byId[l.target];
-  });
-  transform = { x: 0, y: 0, k: 1 };
-  if (simTimer) cancelAnimationFrame(simTimer);
-  let tick = 0;
-  function step() {
-    tick++;
-    const alpha = Math.max(0.015, 1 - tick / 160);
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i], b = nodes[j];
-        let dx = a.x - b.x, dy = a.y - b.y;
-        let dist2 = dx * dx + dy * dy || 1;
-        let dist = Math.sqrt(dist2);
-        const minD = (a.r + b.r) * 3.5;
-        if (dist < minD * 2.8) {
-          const f = (minD * minD) / dist2 * alpha * 0.55;
-          dx = (dx / dist) * f;
-          dy = (dy / dist) * f;
-          a.vx += dx; a.vy += dy;
-          b.vx -= dx; b.vy -= dy;
-        }
-      }
-    }
-    links.forEach((l) => {
-      const a = l.sourceNode, b = l.targetNode;
-      if (!a || !b) return;
-      let dx = b.x - a.x, dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const ideal = l.kind === "tree" ? 120 : 100;
-      const f = (dist - ideal) * 0.035 * alpha;
-      dx = (dx / dist) * f;
-      dy = (dy / dist) * f;
-      a.vx += dx; a.vy += dy;
-      b.vx -= dx; b.vy -= dy;
-    });
-    nodes.forEach((n) => {
-      if (treeLayout && mode === "tree" && n.isCurrent) {
-        // keep current near top
-        n.vy += (H * 0.22 - n.y) * 0.02;
-      }
-      n.vx += (cx - n.x) * 0.003 * alpha;
-      n.vy += (cy - n.y) * 0.002 * alpha;
-      n.vx *= 0.85;
-      n.vy *= 0.85;
-      if (!n.fixed) {
-        n.x += n.vx;
-        n.y += n.vy;
-      }
-    });
-    draw();
-    if (tick < 180) simTimer = requestAnimationFrame(step);
-  }
-  step();
-}
-
-function drawArrowHead(g, ns, x1, y1, x2, y2, color) {
-  const dx = x2 - x1, dy = y2 - y1;
-  const len = Math.sqrt(dx * dx + dy * dy) || 1;
-  const ux = dx / len, uy = dy / len;
-  // tip slightly before node edge
-  const tipX = x2 - ux * 12;
-  const tipY = y2 - uy * 12;
-  const ax = tipX - ux * 8 + uy * 4;
-  const ay = tipY - uy * 8 - ux * 4;
-  const bx = tipX - ux * 8 - uy * 4;
-  const by = tipY - uy * 8 + ux * 4;
-  const poly = document.createElementNS(ns, "polygon");
-  poly.setAttribute("points", tipX + "," + tipY + " " + ax + "," + ay + " " + bx + "," + by);
-  poly.setAttribute("fill", color);
-  g.appendChild(poly);
-}
-
-function draw() {
-  const ns = "http://www.w3.org/2000/svg";
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
-  const gRoot = document.createElementNS(ns, "g");
-  gRoot.setAttribute(
-    "transform",
-    "translate(" + transform.x + "," + transform.y + ") scale(" + transform.k + ")"
-  );
-  svg.appendChild(gRoot);
-
-  // Draw tree links first, then import links
-  const ordered = links.slice().sort((a, b) => (a.kind === "imports" ? 1 : 0) - (b.kind === "imports" ? 1 : 0));
-  ordered.forEach((l) => {
-    const a = l.sourceNode, b = l.targetNode;
-    if (!a || !b) return;
-    const line = document.createElementNS(ns, "line");
-    line.setAttribute("class", "link " + (l.kind || "imports"));
-    line.setAttribute("x1", a.x);
-    line.setAttribute("y1", a.y);
-    line.setAttribute("x2", b.x);
-    line.setAttribute("y2", b.y);
-    const w = l.kind === "tree" ? 2.2 : Math.min(4, 1.2 + Math.log2((l.weight || 1) + 1));
-    line.setAttribute("stroke-width", w);
-    gRoot.appendChild(line);
-    if (l.kind === "imports") {
-      drawArrowHead(gRoot, ns, a.x, a.y, b.x, b.y, "#f0a030");
-    }
-  });
-
-  nodes.forEach((n) => {
-    const group = document.createElementNS(ns, "g");
-    group.setAttribute("class", "node " + n.kind);
-    group.setAttribute("transform", "translate(" + n.x + "," + n.y + ")");
-    group.style.opacity = n.external ? "0.55" : "1";
-    const c = document.createElementNS(ns, "circle");
-    c.setAttribute("r", n.r);
-    if (n.isCurrent) {
-      c.setAttribute("stroke", "#3d9cf0");
-      c.setAttribute("stroke-width", "3");
-    }
-    const title = document.createElementNS(ns, "title");
-    title.textContent = n.title || n.id;
-    c.appendChild(title);
-    const t = document.createElementNS(ns, "text");
-    t.setAttribute("y", n.r + 12);
-    t.textContent = n.label;
-    group.appendChild(c);
-    group.appendChild(t);
-    group.addEventListener("mousedown", (ev) => startDragNode(ev, n));
-    group.addEventListener("click", () => {
-      if (n._suppressClick) {
-        n._suppressClick = false;
-        return;
-      }
-      if (mode !== "tree" || n.kind !== "folder") return;
-      if (n.id === currentDir) {
-        // click current → show files if any
-        const info = folderInfo(n.id);
-        if (info && (info.files || []).length) showFiles(n.id);
-        return;
-      }
-      const info = folderInfo(n.id);
-      const kids = (info && info.children) || [];
-      const files = (info && info.files) || [];
-      if (kids.length) {
-        showTree(n.id);
-      } else if (files.length) {
-        showFiles(n.id);
-      } else {
-        showTree(n.id);
-      }
-    });
-    gRoot.appendChild(group);
-  });
-}
-
-let dragNode = null;
-let dragStart = null;
-function startDragNode(ev, n) {
-  ev.stopPropagation();
-  dragNode = n;
-  n.fixed = true;
-  dragStart = { x: ev.clientX, y: ev.clientY, moved: false };
-  const onMove = (e) => {
-    if (!dragNode) return;
-    const dx = (e.clientX - dragStart.x) / transform.k;
-    const dy = (e.clientY - dragStart.y) / transform.k;
-    if (Math.abs(e.clientX - dragStart.x) + Math.abs(e.clientY - dragStart.y) > 3) {
-      dragStart.moved = true;
-    }
-    dragNode.x += dx;
-    dragNode.y += dy;
-    dragStart.x = e.clientX;
-    dragStart.y = e.clientY;
-    draw();
-  };
-  const onUp = () => {
-    if (dragNode) {
-      dragNode.fixed = false;
-      if (dragStart && dragStart.moved) dragNode._suppressClick = true;
-    }
-    dragNode = null;
-    window.removeEventListener("mousemove", onMove);
-    window.removeEventListener("mouseup", onUp);
-  };
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-}
-
-let panning = false;
-let pan0 = null;
-svg.addEventListener("mousedown", (ev) => {
-  if (ev.target === svg || (ev.target && ev.target.tagName === "svg")) {
-    panning = true;
-    pan0 = { x: ev.clientX, y: ev.clientY, tx: transform.x, ty: transform.y };
-  }
-});
-window.addEventListener("mousemove", (ev) => {
-  if (!panning || !pan0) return;
-  transform.x = pan0.tx + (ev.clientX - pan0.x);
-  transform.y = pan0.ty + (ev.clientY - pan0.y);
-  draw();
-});
-window.addEventListener("mouseup", () => { panning = false; });
-svg.addEventListener(
-  "wheel",
-  (ev) => {
-    ev.preventDefault();
-    transform.k = Math.min(3, Math.max(0.25, transform.k * (ev.deltaY > 0 ? 0.9 : 1.1)));
-    draw();
-  },
-  { passive: false }
-);
-window.addEventListener("resize", () => { draw(); });
-
-showTree("(root)");
-</script>
+<script type="application/json" id="graph-data">__DATA__</script>
 </body>
 </html>
 """
@@ -545,6 +512,19 @@ def render_dep_graph_html(
     title: str = "",
 ) -> str:
     agg = aggregate_folders(graph, depth=folder_depth)
+    folders = {
+        k: {
+            "file_count": v["file_count"],
+            "test_count": v["test_count"],
+            "files": v["files"],
+            "children": v.get("children") or [],
+            "parent": v.get("parent"),
+        }
+        for k, v in agg["folders"].items()
+    }
+    scene = build_flowchart(graph, folders, agg.get("folder_edges") or [])
+    svg = _render_svg(scene)
+
     payload = {
         "repo": graph.repo,
         "commit": graph.commit,
@@ -552,30 +532,30 @@ def render_dep_graph_html(
         "title": title or graph.repo or "dependency graph",
         "nodes": graph.nodes,
         "edges": graph.edges,
-        "folders": {
-            k: {
-                "file_count": v["file_count"],
-                "test_count": v["test_count"],
-                "files": v["files"],
-                "children": v.get("children") or [],
-                "parent": v.get("parent"),
-            }
-            for k, v in agg["folders"].items()
-        },
+        "folders": folders,
         "tree_edges": agg.get("tree_edges") or [],
         "folder_edges": agg.get("folder_edges") or [],
+        "handoff_groups": scene.get("stage_groups") or {},
+        "flowchart": {
+            "nodes": scene["nodes"],
+            "edges": scene["edges"],
+            "expanded": scene.get("expanded"),
+        },
         "languages": list(graph.languages or []),
         "stats": {
             "files": len(graph.nodes),
             "edges": len(graph.edges),
-            "folders": len(agg["folders"]),
+            "folders": len(folders),
         },
     }
     data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     data_json = data_json.replace("<", "\\u003c")
-    html = _HTML_TEMPLATE.replace("__DATA__", data_json)
-    html = html.replace("__TITLE__", _escape_title(payload["title"]))
-    return html
+
+    html_out = _HTML_SHELL
+    html_out = html_out.replace("__TITLE__", _escape_title(payload["title"]))
+    html_out = html_out.replace("__SVG__", svg)
+    html_out = html_out.replace("__DATA__", data_json)
+    return html_out
 
 
 def _escape_title(s: str) -> str:
@@ -597,6 +577,6 @@ def write_dep_graph_html(
 ) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    html = render_dep_graph_html(graph, folder_depth=folder_depth, title=title)
-    out_path.write_text(html, encoding="utf-8")
+    html_out = render_dep_graph_html(graph, folder_depth=folder_depth, title=title)
+    out_path.write_text(html_out, encoding="utf-8")
     return out_path
