@@ -313,20 +313,24 @@ def resolve_ref(
     # Python-style dotted module → path (agents.extraction.foo → agents/extraction/foo.py)
     if re.fullmatch(r"[A-Za-z_][\w.]*", spec):
         dotted = spec.replace(".", "/")
-        for c in _candidate_files(root, dotted):
-            try:
-                return c.resolve().relative_to(root.resolve()).as_posix()
-            except ValueError:
-                continue
+        candidates_rel = [dotted]
+        # ROS2 / nested pkg layout: collision_analyzer.core
+        # → collision_analyzer/collision_analyzer/core.py
+        top = spec.split(".", 1)[0]
+        if (root / top).is_dir():
+            candidates_rel.append(f"{top}/{dotted}")
+            # utilities → utilities/utilities.py or utilities/utilities/__init__.py
+            if "." not in spec:
+                candidates_rel.append(f"{top}/{top}")
         for base in ("src", "apps", "packages", "lib", "backend", "app"):
-            for c in _candidate_files(root, f"{base}/{dotted}"):
-                try:
-                    return c.resolve().relative_to(root.resolve()).as_posix()
-                except ValueError:
-                    continue
-        # single top-level package name
-        if "." not in spec:
-            for c in _candidate_files(root, spec):
+            candidates_rel.append(f"{base}/{dotted}")
+
+        seen_c: set[str] = set()
+        for rel in candidates_rel:
+            if rel in seen_c:
+                continue
+            seen_c.add(rel)
+            for c in _candidate_files(root, rel):
                 try:
                     return c.resolve().relative_to(root.resolve()).as_posix()
                 except ValueError:

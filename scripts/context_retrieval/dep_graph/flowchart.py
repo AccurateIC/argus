@@ -16,10 +16,15 @@ STAGE_W = 168
 STAGE_H = 36
 ROOT_H = 68
 GAP_X = 96
-GAP_Y = 22
+GAP_Y = 16
 PAD = 32
 PAD_TOP = 64
 PAD_BOTTOM = 64
+
+# Keep diagrams readable but show real structure (not just top-level leaves).
+_MAX_CHILDREN_PER_FOLDER = 16
+_MAX_FILES_BESIDE = 10  # files drawn beside each col-2 folder so none look empty
+_MAX_NODES = 220
 
 
 def _label(fid: str, *, is_dir: bool) -> str:
@@ -48,43 +53,40 @@ def _repo_label(graph: FileGraph) -> str:
         return "repo"
 
 
+def _child_items(folders: dict, folder_id: str) -> list[tuple[str, str]]:
+    """Return (id, kind) for immediate children: folders first, then files."""
+    info = folders.get(folder_id) or {}
+    items: list[tuple[str, str]] = []
+    for cid in sorted(info.get("children") or []):
+        items.append((cid, "folder"))
+    for fp in sorted(info.get("files") or []):
+        items.append((fp, "file"))
+    return items
+
+
 def build_flowchart(graph: FileGraph, folders: dict, folder_edges: list[dict]) -> dict:
     """Return nodes/edges with pixel positions for a static SVG.
 
-    Clean column layout:
-    - col 0: repo name (vertically centered on col 1)
-    - col 1: top-level folders/files
-    - col 2: pipeline stages under the pipeline parent only
-    - col 3: one expanded stage example
+    Layout:
+    - col 0: repo
+    - col 1: every top-level folder + root files
+    - col 2: children of each top-level folder (always — not only pipelines)
+    - col 3: one extra detail expansion (richest package / pipeline example)
     """
     root = Path(graph.root)
     root_label = _repo_label(graph)
     stage_groups = detect_stage_groups(root, graph, folders, folder_edges)
     stage_set = {s for kids in stage_groups.values() for s in kids}
+    stage_num = {
+        sid: i + 1 for _parent, ordered in stage_groups.items() for i, sid in enumerate(ordered)
+    }
     h_edges = handoff_edges(stage_groups)
 
     root_info = folders.get("(root)") or {}
-    top_folders = sorted(
-        root_info.get("children") or [],
-        key=lambda fid: (0 if fid in stage_groups else 1, fid),
-    )
+    top_folders = sorted(root_info.get("children") or [])
+    # Prefer pipeline parents first when present
+    top_folders = sorted(top_folders, key=lambda fid: (0 if fid in stage_groups else 1, fid))
     root_files = sorted(root_info.get("files") or [])
-
-    # Expand second stage when present (common “example” slot), else richest
-    expand_id: str | None = None
-    for parent in top_folders:
-        if parent not in stage_groups or not stage_groups[parent]:
-            continue
-        ordered = stage_groups[parent]
-        if len(ordered) >= 2:
-            expand_id = ordered[1]
-        else:
-            expand_id = max(
-                ordered,
-                key=lambda sid: len((folders.get(sid) or {}).get("children") or [])
-                + len((folders.get(sid) or {}).get("files") or []),
-            )
-        break
 
     nodes: dict[str, dict] = {}
     contains: list[dict] = []
@@ -96,10 +98,12 @@ def build_flowchart(graph: FileGraph, folders: dict, folder_edges: list[dict]) -
         col: int,
         row: float,
         *,
-        stage_num: int | None = None,
-    ) -> None:
+        stage_n: int | None = None,
+    ) -> bool:
         if nid in nodes:
-            return
+            return False
+        if len(nodes) >= _MAX_NODES:
+            return False
         if kind == "repo":
             w = max(200, min(280, 36 + len(label) * 8))
             h = ROOT_H
@@ -115,105 +119,139 @@ def build_flowchart(graph: FileGraph, folders: dict, folder_edges: list[dict]) -
             "row": float(row),
             "w": w,
             "h": h,
-            "stage_num": stage_num,
+            "stage_num": stage_n,
         }
+        return True
 
     def link_contains(a: str, b: str) -> None:
         contains.append({"from": a, "to": b, "kind": "contains"})
 
-    # --- Build columns with integer rows (top → bottom) ---
-    # Col 2 first so we know how tall the stage stack is
-    pipe_parents = [f for f in top_folders if f in stage_groups]
-    stage_children: list[str] = []
-    pipe_files: list[str] = []
-    row = 0
-    for parent in pipe_parents:
-        info = folders.get(parent) or {}
-        ordered = list(stage_groups[parent])
-        rest = sorted(
-            c for c in (info.get("children") or []) if c not in set(ordered)
-        )
-        for cid in ordered + rest:
-            kind = "stage" if cid in stage_set else "folder"
-            snum = (ordered.index(cid) + 1) if cid in stage_set else None
-            add_node(cid, _label(cid, is_dir=True), kind, 2, row, stage_num=snum)
-            link_contains(parent, cid)
-            stage_children.append(cid)
-            row += 1
-        for fp in sorted(info.get("files") or []):
-            add_node(fp, _file_label(fp), "file", 2, row)
-            link_contains(parent, fp)
-            pipe_files.append(fp)
-            stage_children.append(fp)
-            row += 1
-
-    stage_top = 0
-    stage_bottom = max(0, row - 1)
-
-    # Col 3: expand one stage — children packed starting at that stage's row
-    note = ""
-    expand_kids: list[str] = []
-    if expand_id and expand_id in nodes:
-        info = folders.get(expand_id) or {}
-        kids = sorted(info.get("children") or [])
-        files = sorted(info.get("files") or [])
-        items = [(c, "folder") for c in kids] + [(f, "file") for f in files]
-        base_row = int(nodes[expand_id]["row"])
-        # Keep stack aligned to expand stage: first child on same row
-        for i, (item, kind) in enumerate(items):
-            label = _label(item, is_dir=True) if kind == "folder" else _file_label(item)
-            add_node(item, label, kind, 3, base_row + i)
-            link_contains(expand_id, item)
-            expand_kids.append(item)
-        if items and pipe_parents and len(stage_groups.get(pipe_parents[0], [])) > 1:
-            note = "Other stages under the same parent follow this same pattern"
-
-    # Col 1: pipeline parent centered on its stage kids; siblings packed
-    # tightly under it (same column — Y may overlap col-2 stages, that's fine).
     add_node("(root)", root_label, "repo", 0, 0)
 
-    if pipe_parents:
-        agents = pipe_parents[0]
-        # Center on stages only (not the README/QC files under agents)
-        stage_only_rows = [
-            nodes[c]["row"]
-            for c in stage_children
-            if c in nodes and nodes[c]["kind"] == "stage"
-        ]
-        if stage_only_rows:
-            mid = (min(stage_only_rows) + max(stage_only_rows)) / 2.0
-        else:
-            mid = (stage_top + stage_bottom) / 2.0
-        add_node(agents, _label(agents, is_dir=True), "folder", 1, 0)
-        nodes[agents]["row"] = mid
-        # Pack other top-level folders/files right under agents — no huge gap
-        next_row = mid + 1.0
-    else:
-        next_row = 0.0
+    def _files_of(folder_id: str) -> list[str]:
+        return [i for i, k in _child_items(folders, folder_id) if k == "file"]
 
-    others = [f for f in top_folders if f not in pipe_parents] + root_files
-    for oid in others:
-        if oid in (folders.get("(root)") or {}).get("children") or []:
-            add_node(oid, _label(oid, is_dir=True), "folder", 1, next_row)
-        else:
-            add_node(oid, _file_label(oid), "file", 1, next_row)
-        link_contains("(root)", oid)
-        next_row += 1.0
+    def _dirs_of(folder_id: str) -> list[str]:
+        return [i for i, k in _child_items(folders, folder_id) if k == "folder"]
 
-    # Link root → pipeline parent
-    for parent in pipe_parents:
-        if parent in nodes:
-            link_contains("(root)", parent)
+    # --- Col 1 + Col 2 + Col 3 ---
+    # Every col-2 folder gets its files drawn beside it (col 3) so folders
+    # like workflows/ / config/ never look empty.
+    row = 0.0
+    col2_ids: list[str] = []
+    expand_id: str | None = None
+    note = ""
 
-    # Align repo with the main trunk (pipeline parent)
-    if pipe_parents and pipe_parents[0] in nodes:
-        nodes["(root)"]["row"] = nodes[pipe_parents[0]]["row"]
-    else:
-        col1_rows = [n["row"] for n in nodes.values() if n["col"] == 1]
-        if col1_rows:
-            nodes["(root)"]["row"] = (min(col1_rows) + max(col1_rows)) / 2.0
+    for fid in top_folders:
+        add_node(fid, _label(fid, is_dir=True), "folder", 1, row)
+        link_contains("(root)", fid)
 
-    # Uses: top-level only, skip if either end is missing
+        items = _child_items(folders, fid)
+        if fid in stage_groups:
+            ordered = stage_groups[fid]
+            ordered_set = set(ordered)
+            rest = [it for it in items if it[0] not in ordered_set]
+            items = [(sid, "folder") for sid in ordered] + rest
+
+        if len(items) > _MAX_CHILDREN_PER_FOLDER:
+            items = items[:_MAX_CHILDREN_PER_FOLDER]
+
+        if not items:
+            row += 1.0
+            continue
+
+        start = row
+        for cid, ckind in items:
+            if ckind == "file":
+                if add_node(cid, _file_label(cid), "file", 2, row):
+                    link_contains(fid, cid)
+                    col2_ids.append(cid)
+                    row += 1.0
+                continue
+
+            # Folder in col 2
+            kind = "stage" if cid in stage_set else "folder"
+            if not add_node(
+                cid,
+                _label(cid, is_dir=True),
+                kind,
+                2,
+                row,
+                stage_n=stage_num.get(cid),
+            ):
+                continue
+            link_contains(fid, cid)
+            col2_ids.append(cid)
+
+            # Build detail list for col 3: immediate files, plus files inside
+            # leaf subfolders (subfolders that only contain files).
+            detail: list[tuple[str, str, str]] = []  # id, kind, parent_for_edge
+            for fp in _files_of(cid)[:_MAX_FILES_BESIDE]:
+                detail.append((fp, "file", cid))
+
+            for sub in _dirs_of(cid):
+                sub_files = _files_of(sub)
+                sub_dirs = _dirs_of(sub)
+                if not sub_files and not sub_dirs:
+                    continue
+                if sub_dirs:
+                    # Nested package dir (e.g. collision_analyzer/collision_analyzer/)
+                    # — show the folder + a sample of its files
+                    detail.append((sub, "folder", cid))
+                    for fp in sub_files[:_MAX_FILES_BESIDE]:
+                        detail.append((fp, "file", sub))
+                else:
+                    # Leaf folder with only files (workflows/, config/, …)
+                    detail.append((sub, "folder", cid))
+                    for fp in sub_files[:_MAX_FILES_BESIDE]:
+                        detail.append((fp, "file", sub))
+
+            # Dedupe while preserving order
+            seen_d: set[str] = set()
+            uniq: list[tuple[str, str, str]] = []
+            for item, ikind, parent in detail:
+                if item in seen_d or item in nodes:
+                    continue
+                seen_d.add(item)
+                uniq.append((item, ikind, parent))
+            detail = uniq[: max(_MAX_FILES_BESIDE + 4, 14)]
+
+            span = max(1, len(detail))
+            for i, (item, ikind, parent) in enumerate(detail):
+                dkind = "stage" if item in stage_set else ikind
+                dlabel = (
+                    _label(item, is_dir=True)
+                    if ikind == "folder" or dkind == "stage"
+                    else _file_label(item)
+                )
+                if add_node(item, dlabel, dkind, 3, row + i, stage_n=stage_num.get(item)):
+                    link_contains(parent, item)
+
+            nodes[cid]["row"] = row + (span - 1) / 2.0
+            if detail and expand_id is None:
+                expand_id = cid
+            row += float(span)
+
+        end = row - 1.0
+        if end >= start:
+            nodes[fid]["row"] = (start + end) / 2.0
+        row += 0.4  # gap between top-level packages
+
+    for fp in root_files:
+        if add_node(fp, _file_label(fp), "file", 1, row):
+            link_contains("(root)", fp)
+            row += 1.0
+
+    if expand_id:
+        note = "Files are shown beside each folder — open a package block to see its contents"
+
+    # Center repo on col-1 stack
+    col1_rows = [n["row"] for n in nodes.values() if n["col"] == 1]
+    if col1_rows:
+        nodes["(root)"]["row"] = (min(col1_rows) + max(col1_rows)) / 2.0
+
+    # Uses: only between different columns (same-column below-route looks like
+    # fake vertical “pipeline” arrows between siblings).
     top_set = set(top_folders)
 
     def top_of(fid: str) -> str | None:
@@ -230,21 +268,34 @@ def build_flowchart(graph: FileGraph, folders: dict, folder_edges: list[dict]) -
     for e in folder_edges:
         a = top_of(e.get("from") or "")
         b = top_of(e.get("to") or "")
-        if a and b and a != b and a in nodes and b in nodes:
-            rolled[(a, b)] = rolled.get((a, b), 0) + int(e.get("weight") or 1)
-    uses = [
-        {"from": a, "to": b, "kind": "uses", "weight": w, "route": "below"}
-        for (a, b), w in sorted(rolled.items())
-    ]
+        if not a or not b or a == b:
+            continue
+        if a not in nodes or b not in nodes:
+            continue
+        # Prefer linking the expanded detail nodes when both sides visible deeper
+        rolled[(a, b)] = rolled.get((a, b), 0) + int(e.get("weight") or 1)
+
+    uses: list[dict] = []
+    for (a, b), w in sorted(rolled.items()):
+        # Skip same-column pairs — they render as confusing vertical arrows
+        if nodes[a]["col"] == nodes[b]["col"]:
+            continue
+        uses.append({"from": a, "to": b, "kind": "uses", "weight": w, "route": "below"})
+
+    # Also keep file-level uses between visible nodes in different columns
+    for e in graph.edges:
+        frm, to = e.get("from"), e.get("to")
+        if frm in nodes and to in nodes and nodes[frm]["col"] != nodes[to]["col"]:
+            uses.append({"from": frm, "to": to, "kind": "uses", "weight": 1, "route": "below"})
 
     visible = set(nodes)
     handoffs = [
-        {**e, "route": "right"}
+        {**e, "route": "box"}
         for e in h_edges
         if e["from"] in visible and e["to"] in visible
     ]
 
-    # Pixel positions — integer-ish rows, shared column x
+    # Pixel positions
     min_row = min((n["row"] for n in nodes.values()), default=0.0)
     if min_row != 0:
         for n in nodes.values():
@@ -261,27 +312,22 @@ def build_flowchart(graph: FileGraph, folders: dict, folder_edges: list[dict]) -
     for c in range(1, max_col + 1):
         col_x[c] = col_x[c - 1] + col_widths[c - 1] + GAP_X
 
-    # Rail x between columns (for orthogonal contains)
-    rails = {
-        c: col_x[c] + col_widths[c] + GAP_X * 0.38
-        for c in range(max_col)
-    }
+    rails = {c: col_x[c] + col_widths[c] + GAP_X * 0.38 for c in range(max_col)}
 
     for n in nodes.values():
         n["x"] = col_x[n["col"]] + (col_widths[n["col"]] - n["w"]) / 2.0
         n["y"] = PAD_TOP + n["row"] * (NODE_H + GAP_Y)
 
     width = int(col_x[max_col] + col_widths[max_col] + PAD)
-    # Extra bottom space for below-routed uses edges
     height = int(
         PAD_TOP
         + PAD_BOTTOM
         + (max_row + 1) * (NODE_H + GAP_Y)
-        + (36 if uses else 0)
+        + (40 if uses else 0)
     )
 
     n_files = len(graph.nodes)
-    n_folders = max(0, len(folders) - 1)  # exclude (root)
+    n_folders = max(0, len(folders) - 1)
     return {
         "nodes": list(nodes.values()),
         "edges": contains + handoffs + uses,
@@ -289,7 +335,7 @@ def build_flowchart(graph: FileGraph, folders: dict, folder_edges: list[dict]) -
         "stage_groups": {k: v for k, v in stage_groups.items()},
         "expanded": expand_id,
         "note": note,
-        "width": max(width, 860),
+        "width": max(width, 900),
         "height": max(height, 520),
         "meta": {
             "repo": graph.repo or Path(graph.root).name or "local",

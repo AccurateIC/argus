@@ -90,7 +90,10 @@ def _render_node(n: dict, colors: dict) -> str:
     kind = n["kind"]
     x, y, w, h = n["x"], n["y"], n["w"], n["h"]
     label = n["label"]
-    parts: list[str] = ["<g>"]
+    clickable = kind in {"repo", "folder", "stage"}
+    cursor = "cursor:pointer;" if clickable else ""
+    data_attr = f' data-folder-id="{_escape(n["id"])}"' if clickable else ""
+    parts: list[str] = [f'<g class="node node-{kind}" style="{cursor}"{data_attr}>']
 
     if kind == "repo":
         fill, stroke = colors["repo_fill"], colors["repo_stroke"]
@@ -414,7 +417,7 @@ def _render_svg(scene: dict) -> str:
             f"Files: {meta.get('files', 0)}",
             f"File-links: {meta.get('file_links', 0)}",
             f"Folders: {meta.get('folders', 0)}",
-            "static flowchart",
+            "click a folder to open",
         ]
         if x
     )
@@ -485,24 +488,97 @@ _HTML_SHELL = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Argus Repository Dependency Graph — __TITLE__</title>
 <style>
-  :root { --bg: #0b1220; --text: #e8eef8; }
+  :root { --bg: #0b1220; --text: #e8eef8; --muted: #8b9bb4; --panel: #121a2b; --line: #2a3650; }
   * { box-sizing: border-box; }
   body {
     margin: 0; font-family: "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg); color: var(--text); min-height: 100vh;
   }
-  #wrap { padding: 8px 12px 20px; overflow: auto; }
-  #wrap svg { display: block; margin: 0 auto; max-width: none; }
+  #bar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  #btnBack {
+    background: #1a2740; color: var(--text); border: 1px solid #3d5a80;
+    border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  #btnBack:disabled { opacity: 0.35; cursor: default; }
+  #btnBack:not(:disabled):hover { background: #243552; }
+  #crumb { color: var(--muted); font-size: 13px; flex: 1; }
+  #wrap { padding: 8px 12px 12px; overflow: auto; }
+  #stage svg { display: block; margin: 0 auto; max-width: none; }
+  #stage g[data-folder-id] { cursor: pointer; }
+  #legend {
+    margin: 8px 12px 0; padding: 8px 10px 9px; max-width: 420px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  }
+  #legend h2 {
+    margin: 0 0 6px; font-size: 11px; font-weight: 700; color: var(--text);
+  }
+  #legend .cols {
+    display: flex; flex-direction: column; gap: 5px;
+  }
+  #legend .col {
+    display: flex; gap: 8px; align-items: center;
+    border-left: none; padding-left: 0;
+  }
+  #legend .ico {
+    flex: 0 0 22px; width: 22px; height: 16px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #legend .ico svg { max-width: 20px; max-height: 16px; }
+  #legend .txt { font-size: 10px; line-height: 1.25; color: var(--muted); }
+  #legend .txt strong { color: var(--text); font-weight: 600; margin-right: 4px; }
 </style>
 </head>
 <body>
-<div id="wrap">
-__SVG__
+<div id="bar">
+  <button type="button" id="btnBack" disabled>Expand all</button>
+  <div id="crumb">Folders start closed — click ▸ to open</div>
 </div>
+<div id="legend">
+  <h2>How to read this graph</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="ico"><svg width="16" height="13" viewBox="0 0 22 18"><path d="M1 6 h7 l2.5 3 h11.5 v9 h-21 z" fill="#3b82f6"/></svg></div>
+      <div class="txt"><strong>Folder:</strong>holds files/folders · click ▸/▾</div>
+    </div>
+    <div class="col">
+      <div class="ico"><svg width="13" height="15" viewBox="0 0 18 20"><path d="M2 1 h9 l5 5 v13 h-14 z" fill="none" stroke="#10b981" stroke-width="1.8"/><path d="M11 1 v5 h5" fill="none" stroke="#10b981" stroke-width="1.8"/></svg></div>
+      <div class="txt"><strong>File:</strong>document or code file</div>
+    </div>
+    <div class="col">
+      <div class="ico"><svg width="20" height="10" viewBox="0 0 28 12"><line x1="0" y1="6" x2="20" y2="6" stroke="#c5d0e0" stroke-width="2"/><polygon points="20,2 28,6 20,10" fill="#c5d0e0"/></svg></div>
+      <div class="txt"><strong>Contains:</strong>folder → what’s inside</div>
+    </div>
+    <div class="col">
+      <div class="ico"><svg width="12" height="22" viewBox="0 0 20 36"><circle cx="10" cy="8" r="7" fill="#8b5cf6"/><text x="10" y="11.5" text-anchor="middle" fill="#fff" font-size="9" font-weight="700" font-family="sans-serif">1</text><line x1="10" y1="16" x2="10" y2="22" stroke="#8b5cf6" stroke-width="2"/><circle cx="10" cy="29" r="7" fill="#8b5cf6"/><text x="10" y="32.5" text-anchor="middle" fill="#fff" font-size="9" font-weight="700" font-family="sans-serif">2</text></svg></div>
+      <div class="txt"><strong>Pipeline:</strong>step 1 before step 2</div>
+    </div>
+    <div class="col">
+      <div class="ico"><svg width="20" height="10" viewBox="0 0 28 12"><line x1="0" y1="6" x2="20" y2="6" stroke="#5b9fd4" stroke-width="2" stroke-dasharray="4 3"/><polygon points="20,2 28,6 20,10" fill="#5b9fd4"/></svg></div>
+      <div class="txt"><strong>Uses:</strong>one part depends on another</div>
+    </div>
+  </div>
+</div>
+<div id="wrap"><div id="stage">
+__SVG__
+</div></div>
 <script type="application/json" id="graph-data">__DATA__</script>
+<script>
+__INTERACTIVE_JS__
+</script>
 </body>
 </html>
 """
+
+
+def _load_interactive_js() -> str:
+    path = Path(__file__).resolve().parent / "interactive.js"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return "/* interactive.js missing */"
 
 
 def render_dep_graph_html(
@@ -555,6 +631,7 @@ def render_dep_graph_html(
     html_out = html_out.replace("__TITLE__", _escape_title(payload["title"]))
     html_out = html_out.replace("__SVG__", svg)
     html_out = html_out.replace("__DATA__", data_json)
+    html_out = html_out.replace("__INTERACTIVE_JS__", _load_interactive_js())
     return html_out
 
 
