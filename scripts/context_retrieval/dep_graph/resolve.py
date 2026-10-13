@@ -274,17 +274,23 @@ def resolve_ref(
                 except ValueError:
                     continue
 
-    # Python-style dotted module → path
-    if re.fullmatch(r"[A-Za-z_][\w.]*", spec) and "." in spec:
+    # Python-style dotted module → path (agents.extraction.foo → agents/extraction/foo.py)
+    if re.fullmatch(r"[A-Za-z_][\w.]*", spec):
         dotted = spec.replace(".", "/")
         for c in _candidate_files(root, dotted):
             try:
                 return c.resolve().relative_to(root.resolve()).as_posix()
             except ValueError:
                 continue
-        # try under common roots
-        for base in ("src", "apps", "packages", "lib"):
+        for base in ("src", "apps", "packages", "lib", "backend", "app"):
             for c in _candidate_files(root, f"{base}/{dotted}"):
+                try:
+                    return c.resolve().relative_to(root.resolve()).as_posix()
+                except ValueError:
+                    continue
+        # single top-level package name
+        if "." not in spec:
+            for c in _candidate_files(root, spec):
                 try:
                     return c.resolve().relative_to(root.resolve()).as_posix()
                 except ValueError:
