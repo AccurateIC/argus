@@ -31,6 +31,11 @@ g = build_file_graph(ROOT, repo="AccurateIC/mini_app", commit="deadbeefcafebabe"
 assert "apps/api/src/service.ts" in g.nodes
 assert "apps/api/src/controller.ts" in g.nodes
 assert g.nodes["apps/api/src/service.test.ts"]["kind"] == "test"
+# Full-repo nodes: python / css / html too
+assert "apps/api/src/app.py" in g.nodes
+assert "apps/web/src/styles.css" in g.nodes
+assert "apps/web/index.html" in g.nodes
+assert "py" in g.languages and "css" in g.languages and "html" in g.languages
 
 # controller → service
 assert "apps/api/src/service.ts" in g.imports.get("apps/api/src/controller.ts", [])
@@ -41,6 +46,14 @@ assert "apps/api/src/service.test.ts" in imps
 
 # web → validation (relative)
 assert "packages/validation/src/schema.ts" in g.imports.get("apps/web/src/app.ts", [])
+
+# Python relative import
+assert "apps/api/src/util.py" in g.imports.get("apps/api/src/app.py", [])
+# CSS @import
+assert "apps/web/src/theme.css" in g.imports.get("apps/web/src/styles.css", [])
+# HTML href/src
+assert "apps/web/src/styles.css" in g.imports.get("apps/web/index.html", [])
+assert "apps/web/src/app.ts" in g.imports.get("apps/web/index.html", [])
 
 agg = aggregate_folders(g, depth=2)
 assert "apps/api" in agg["folders"]

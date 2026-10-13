@@ -65,7 +65,9 @@ Workflow entrypoint: [`scripts/build_pr_dep_graph.sh`](../scripts/build_pr_dep_g
 
 ## Notes
 
-- Skips `node_modules`, `dist`, `.next`, etc.
-- Resolves relative imports and simple `tsconfig` `paths` aliases.
-- npm packages are external (not expanded).
-- Graph does **not** yet feed into the Qwen prompt; it is generated alongside the review for you to inspect.
+- **Full repo graph:** every non-binary file is a node (Python, JS/TS, CSS, HTML, JSON, Markdown, Vue, etc.).
+- Edges from language-aware refs: JS/TS `import`/`require`, Python `import`/`from`, CSS `@import`/`url()`, HTML `src`/`href`, plus quoted relative paths.
+- Skips junk dirs (`node_modules`, `dist`, `.next`, `.git`, venvs, …) and binaries (images, fonts, archives, …).
+- Resolves relative paths and simple `tsconfig` `paths` aliases.
+- npm/PyPI packages are external (not expanded into site-packages).
+- Graph is stored on the runner only; it does **not** yet feed into the Qwen prompt.

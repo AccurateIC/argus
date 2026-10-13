@@ -111,7 +111,9 @@ metaEl.textContent = [
   DATA.repo || "local",
   DATA.commit ? ("@" + DATA.commit.slice(0, 7)) : "",
   (DATA.stats && DATA.stats.files) ? (DATA.stats.files + " files") : "",
+  (DATA.stats && DATA.stats.edges) ? (DATA.stats.edges + " edges") : "",
   (DATA.stats && DATA.stats.folders) ? (DATA.stats.folders + " folders") : "",
+  (DATA.languages && DATA.languages.length) ? DATA.languages.slice(0, 8).join("/") : "",
 ].filter(Boolean).join(" · ");
 
 let mode = "folders"; // or "files"
@@ -429,6 +431,7 @@ def render_dep_graph_html(
             for k, v in agg["folders"].items()
         },
         "folder_edges": agg["folder_edges"],
+        "languages": list(graph.languages or []),
         "stats": {
             "files": len(graph.nodes),
             "edges": len(graph.edges),

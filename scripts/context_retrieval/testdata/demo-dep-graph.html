@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Argus dependency graph — Demo graph</title>
+<title>Argus dependency graph — Full repo graph</title>
 <style>
   :root {
     --bg: #0f1419;
@@ -87,7 +87,7 @@
   <div class="hint" id="hint">Drag background to pan · Scroll to zoom · Drag nodes to rearrange</div>
 </div>
 <script>
-const DATA = {"repo":"AccurateIC/mini_app","commit":"abcdef1","built_at":"2026-10-13T04:45:39Z","title":"Demo graph","nodes":{"packages/validation/src/schema.ts":{"lang":"ts","kind":"source"},"apps/api/src/service.ts":{"lang":"ts","kind":"source"},"apps/api/src/service.test.ts":{"lang":"ts","kind":"test"},"apps/api/src/controller.ts":{"lang":"ts","kind":"source"},"apps/web/src/app.ts":{"lang":"ts","kind":"source"}},"edges":[{"from":"apps/api/src/service.test.ts","to":"apps/api/src/service.ts","via":"import"},{"from":"apps/api/src/controller.ts","to":"apps/api/src/service.ts","via":"import"},{"from":"apps/web/src/app.ts","to":"packages/validation/src/schema.ts","via":"import"}],"folders":{"packages/validation":{"file_count":1,"test_count":0,"files":["packages/validation/src/schema.ts"]},"apps/api":{"file_count":3,"test_count":1,"files":["apps/api/src/controller.ts","apps/api/src/service.test.ts","apps/api/src/service.ts"]},"apps/web":{"file_count":1,"test_count":0,"files":["apps/web/src/app.ts"]}},"folder_edges":[{"from":"apps/web","to":"packages/validation","weight":1}],"stats":{"files":5,"edges":3,"folders":3}};
+const DATA = {"repo":"AccurateIC/mini_app","commit":"abcdef1","built_at":"2026-10-13T05:22:27Z","title":"Full repo graph","nodes":{"packages/validation/src/schema.ts":{"lang":"ts","kind":"source"},"apps/api/src/service.ts":{"lang":"ts","kind":"source"},"apps/api/src/service.test.ts":{"lang":"ts","kind":"test"},"apps/api/src/util.py":{"lang":"py","kind":"source"},"apps/api/src/app.py":{"lang":"py","kind":"source"},"apps/api/src/controller.ts":{"lang":"ts","kind":"source"},"apps/web/index.html":{"lang":"html","kind":"source"},"apps/web/src/styles.css":{"lang":"css","kind":"source"},"apps/web/src/theme.css":{"lang":"css","kind":"source"},"apps/web/src/app.ts":{"lang":"ts","kind":"source"}},"edges":[{"from":"apps/api/src/service.test.ts","to":"apps/api/src/service.ts","via":"ref"},{"from":"apps/api/src/app.py","to":"apps/api/src/util.py","via":"ref"},{"from":"apps/api/src/controller.ts","to":"apps/api/src/service.ts","via":"ref"},{"from":"apps/web/index.html","to":"apps/web/src/styles.css","via":"ref"},{"from":"apps/web/index.html","to":"apps/web/src/app.ts","via":"ref"},{"from":"apps/web/src/styles.css","to":"apps/web/src/theme.css","via":"ref"},{"from":"apps/web/src/app.ts","to":"packages/validation/src/schema.ts","via":"ref"}],"folders":{"packages/validation":{"file_count":1,"test_count":0,"files":["packages/validation/src/schema.ts"]},"apps/api":{"file_count":5,"test_count":1,"files":["apps/api/src/app.py","apps/api/src/controller.ts","apps/api/src/service.test.ts","apps/api/src/service.ts","apps/api/src/util.py"]},"apps/web":{"file_count":4,"test_count":0,"files":["apps/web/index.html","apps/web/src/app.ts","apps/web/src/styles.css","apps/web/src/theme.css"]}},"folder_edges":[{"from":"apps/web","to":"packages/validation","weight":1}],"languages":["css","html","py","ts"],"stats":{"files":10,"edges":7,"folders":3}};
 
 const svg = document.getElementById("canvas");
 const btnBack = document.getElementById("btnBack");
@@ -98,7 +98,9 @@ metaEl.textContent = [
   DATA.repo || "local",
   DATA.commit ? ("@" + DATA.commit.slice(0, 7)) : "",
   (DATA.stats && DATA.stats.files) ? (DATA.stats.files + " files") : "",
+  (DATA.stats && DATA.stats.edges) ? (DATA.stats.edges + " edges") : "",
   (DATA.stats && DATA.stats.folders) ? (DATA.stats.folders + " folders") : "",
+  (DATA.languages && DATA.languages.length) ? DATA.languages.slice(0, 8).join("/") : "",
 ].filter(Boolean).join(" · ");
 
 let mode = "folders"; // or "files"

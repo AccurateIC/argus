@@ -1,33 +1,27 @@
-"""Scan a repo for TS/JS import edges (file → file)."""
+"""Scan a full repo for file dependency edges (all text/source kinds)."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .extractors import extract_specifiers, extract_specifiers_for_file
 from .resolve import (
-    _SOURCE_SUFFIXES,
     is_test_path,
+    lang_of,
     load_path_aliases,
-    resolve_import,
+    resolve_ref,
     should_skip_dir,
+    should_skip_file,
 )
 
-# Captures the module specifier from common ESM/CJS import forms.
-_IMPORT_RE = re.compile(
-    r"""(?x)
-    (?:
-        import\s+(?:type\s+)?(?:[\w*\s{},]+)\s+from\s+['"]([^'"]+)['"]
-      | import\s+['"]([^'"]+)['"]
-      | export\s+(?:type\s+)?(?:[\w*\s{},]+)\s+from\s+['"]([^'"]+)['"]
-      | export\s+\*\s+from\s+['"]([^'"]+)['"]
-      | require\s*\(\s*['"]([^'"]+)['"]\s*\)
-      | import\s*\(\s*['"]([^'"]+)['"]\s*\)
-    )
-    """
-)
+# Re-export for tests
+__all__ = ["FileGraph", "build_file_graph", "extract_specifiers"]
+
+_MAX_FILE_BYTES = 1_500_000
+# Cap nodes for pathological monorepos (still "full" for normal apps).
+_MAX_NODES = 25_000
 
 
 @dataclass
@@ -37,9 +31,10 @@ class FileGraph:
     repo: str = ""
     built_at: str = ""
     nodes: dict[str, dict] = field(default_factory=dict)
-    edges: list[dict] = field(default_factory=list)  # {from, to}
+    edges: list[dict] = field(default_factory=list)
     imports: dict[str, list[str]] = field(default_factory=dict)
     imported_by: dict[str, list[str]] = field(default_factory=dict)
+    languages: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -48,7 +43,7 @@ class FileGraph:
             "repo": self.repo,
             "commit": self.commit,
             "built_at": self.built_at,
-            "languages": ["typescript", "javascript"],
+            "languages": self.languages,
             "nodes": self.nodes,
             "edges": self.edges,
             "imports": self.imports,
@@ -56,36 +51,26 @@ class FileGraph:
         }
 
 
-def extract_specifiers(source: str) -> list[str]:
-    specs: list[str] = []
-    for m in _IMPORT_RE.finditer(source):
-        for g in m.groups():
-            if g:
-                specs.append(g)
-                break
-    return specs
+def iter_repo_files(root: Path) -> list[Path]:
+    """Every non-skipped file under root (full repo graph nodes)."""
+    import os
 
-
-def iter_source_files(root: Path) -> list[Path]:
     files: list[Path] = []
     root = root.resolve()
-    for dirpath, dirnames, filenames in os_walk_filtered(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not should_skip_dir(d)]
         for name in filenames:
-            if name.endswith(_SOURCE_SUFFIXES):
-                files.append(Path(dirpath) / name)
+            path = Path(dirpath) / name
+            if should_skip_file(path):
+                continue
+            files.append(path)
+            if len(files) >= _MAX_NODES:
+                return files
     return files
 
 
-def os_walk_filtered(root: Path):
-    import os
-
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not should_skip_dir(d)]
-        yield dirpath, dirnames, filenames
-
-
 def detect_git_commit(root: Path) -> str:
-    """Return HEAD only when ``root`` itself is (or is inside) this repo's toplevel."""
+    """Return HEAD only when ``root`` is the git toplevel."""
     import subprocess
 
     try:
@@ -99,7 +84,6 @@ def detect_git_commit(root: Path) -> str:
             return ""
         toplevel = Path(top.stdout.strip()).resolve()
         if toplevel != root.resolve():
-            # e.g. fixture folder nested under another git repo — don't steal parent SHA
             return ""
         r = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -129,17 +113,23 @@ def build_file_graph(
         built_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
 
-    files = iter_source_files(root)
+    files = iter_repo_files(root)
+    langs: set[str] = set()
+
     for path in files:
         try:
             rel = path.resolve().relative_to(root).as_posix()
         except ValueError:
             continue
+        lang = lang_of(rel)
+        langs.add(lang)
         g.nodes[rel] = {
-            "lang": "ts" if path.suffix in {".ts", ".tsx"} else "js",
+            "lang": lang,
             "kind": "test" if is_test_path(rel) else "source",
         }
         g.imports.setdefault(rel, [])
+
+    g.languages = sorted(langs)
 
     for path in files:
         try:
@@ -147,22 +137,25 @@ def build_file_graph(
         except ValueError:
             continue
         try:
+            # binary-ish detection: skip if null bytes in first chunk
+            raw = path.read_bytes()[:8192]
+            if b"\x00" in raw:
+                continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        # Skip huge generated blobs
-        if len(text) > 1_500_000:
+        if len(text) > _MAX_FILE_BYTES:
             continue
+
         seen_targets: set[str] = set()
-        for spec in extract_specifiers(text):
-            target = resolve_import(root, path, spec, aliases)
+        for spec in extract_specifiers_for_file(path, text):
+            target = resolve_ref(root, path, spec, aliases)
             if not target or target == rel or target in seen_targets:
                 continue
             if target not in g.nodes:
-                # Imported file outside walk (e.g. .json) — skip
                 continue
             seen_targets.add(target)
-            g.edges.append({"from": rel, "to": target, "via": "import"})
+            g.edges.append({"from": rel, "to": target, "via": "ref"})
             g.imports.setdefault(rel, []).append(target)
             g.imported_by.setdefault(target, []).append(rel)
 
