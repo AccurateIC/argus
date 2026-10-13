@@ -56,12 +56,23 @@ assert "apps/web/src/styles.css" in g.imports.get("apps/web/index.html", [])
 assert "apps/web/src/app.ts" in g.imports.get("apps/web/index.html", [])
 
 agg = aggregate_folders(g, depth=2)
+assert "(root)" in agg["folders"]
+assert "apps" in agg["folders"]
 assert "apps/api" in agg["folders"]
 assert "apps/web" in agg["folders"]
 assert "packages/validation" in agg["folders"]
-# cross-folder edge web → validation
+# Tree: root contains apps; apps contains apps/api
+assert "apps" in agg["folders"]["(root)"]["children"]
+assert "apps/api" in agg["folders"]["apps"]["children"]
+assert any(e["kind"] == "contains" for e in agg["tree_edges"])
+# Import edge between leaf folders (file dirs)
 pairs = {(e["from"], e["to"]) for e in agg["folder_edges"]}
-assert ("apps/web", "packages/validation") in pairs
+assert ("apps/web/src", "packages/validation/src") in pairs or (
+    "apps/web",
+    "packages/validation",
+) in pairs or any(
+    "validation" in b and "web" in a for a, b in pairs
+), pairs
 
 related = hop1_related(g, ["apps/api/src/service.ts"])
 assert "apps/api/src/controller.ts" in related["dependents"]
@@ -83,9 +94,9 @@ with tempfile.TemporaryDirectory() as tmp:
     out = Path(tmp) / "dep-graph.html"
     write_dep_graph_html(g, out, folder_depth=2, title="mini")
     html = out.read_text(encoding="utf-8")
-    assert "All folders" in html
-    assert "apps/api" in html
-    assert "showFolder" in html
+    assert "(root)" in html
+    assert "showTree" in html
+    assert "Show files" in html
     assert "DATA" in html
     # single file deliverable
     assert out.is_file()

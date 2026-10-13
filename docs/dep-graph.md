@@ -44,9 +44,11 @@ Or on the runner: `python3 -m http.server 8765` in that folder, and on your lapt
 
 ## What you see in the HTML
 
-1. **Folder view** — folders as nodes; arrows = folder imports folder.
-2. **Click a folder** — files + import edges (grey = outside that folder).
-3. **← Folders** — back.
+1. **Start at `(root)`** — only top-level folders (e.g. `app`, `agents`), with **grey lines** = “contains” (real repo tree).
+2. **Orange dashed arrows** = import/uses between folders or files.
+3. **Click a folder** — drill into its subfolders (not all nested folders dumped at once).
+4. **Show files** (or click a leaf folder) — files in that folder + orange import arrows (dim = outside).
+5. **← Up** — go to parent folder / back from files.
 
 No CDN (offline SVG + force layout).
 

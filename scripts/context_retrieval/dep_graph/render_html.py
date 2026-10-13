@@ -1,4 +1,4 @@
-"""Emit one self-contained interactive HTML dependency diagram."""
+"""Emit one self-contained interactive HTML dependency diagram (repo tree)."""
 
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     --folder: #5b8def;
     --file: #3ecf8e;
     --test: #e6a23c;
-    --edge: #4a5d78;
+    --edge-tree: #6b7c93;
+    --edge-dep: #f0a030;
     --ext: #7a8699;
   }
   * { box-sizing: border-box; }
@@ -43,7 +44,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
   header .meta { color: var(--muted); font-size: 12px; }
-  #toolbar { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+  #toolbar { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
   button {
     background: #243044; color: var(--text); border: 1px solid #3a4a63;
     border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
@@ -64,12 +65,13 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     fill: var(--text); font-size: 11px; pointer-events: none;
     text-anchor: middle; paint-order: stroke; stroke: var(--bg); stroke-width: 3px;
   }
-  .link { stroke: var(--edge); stroke-opacity: 0.85; fill: none; }
+  .link.tree { stroke: var(--edge-tree); stroke-opacity: 0.9; fill: none; }
+  .link.imports { stroke: var(--edge-dep); stroke-opacity: 0.95; fill: none; stroke-dasharray: 6 4; }
   .hint {
     position: absolute; bottom: 12px; left: 12px; right: 12px;
     color: var(--muted); font-size: 12px; pointer-events: none;
   }
-  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); }
+  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
   .legend span::before {
     content: ""; display: inline-block; width: 8px; height: 8px;
     border-radius: 50%; margin-right: 4px; vertical-align: middle;
@@ -78,6 +80,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .legend .l-file::before { background: var(--file); }
   .legend .l-test::before { background: var(--test); }
   .legend .l-ext::before { background: var(--ext); }
+  .legend .l-tree::before { background: var(--edge-tree); border-radius: 0; height: 2px; width: 14px; vertical-align: middle; }
+  .legend .l-dep::before { background: var(--edge-dep); border-radius: 0; height: 2px; width: 14px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -89,21 +93,25 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
       <span class="l-folder">folder</span>
       <span class="l-file">file</span>
       <span class="l-test">test</span>
-      <span class="l-ext">outside folder</span>
+      <span class="l-ext">outside</span>
+      <span class="l-tree">tree (contains)</span>
+      <span class="l-dep">imports / uses</span>
     </div>
-    <button type="button" id="btnBack" disabled>← Folders</button>
+    <button type="button" id="btnFiles" disabled>Show files</button>
+    <button type="button" id="btnBack" disabled>← Up</button>
   </div>
-  <div id="breadcrumb">View: <strong>All folders</strong> — click a folder to see its files</div>
+  <div id="breadcrumb">View: <strong>(root)</strong> — click a folder to open it</div>
 </header>
 <div id="stage">
   <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
-  <div class="hint" id="hint">Drag background to pan · Scroll to zoom · Drag nodes to rearrange</div>
+  <div class="hint" id="hint">Grey lines = folder tree · Orange dashed = imports · Click folder to drill in · Show files for file relationships</div>
 </div>
 <script>
 const DATA = __DATA__;
 
 const svg = document.getElementById("canvas");
 const btnBack = document.getElementById("btnBack");
+const btnFiles = document.getElementById("btnFiles");
 const breadcrumb = document.getElementById("breadcrumb");
 const metaEl = document.getElementById("meta");
 
@@ -111,13 +119,13 @@ metaEl.textContent = [
   DATA.repo || "local",
   DATA.commit ? ("@" + DATA.commit.slice(0, 7)) : "",
   (DATA.stats && DATA.stats.files) ? (DATA.stats.files + " files") : "",
-  (DATA.stats && DATA.stats.edges) ? (DATA.stats.edges + " edges") : "",
+  (DATA.stats && DATA.stats.edges) ? (DATA.stats.edges + " file-links") : "",
   (DATA.stats && DATA.stats.folders) ? (DATA.stats.folders + " folders") : "",
   (DATA.languages && DATA.languages.length) ? DATA.languages.slice(0, 8).join("/") : "",
 ].filter(Boolean).join(" · ");
 
-let mode = "folders"; // or "files"
-let currentFolder = null;
+let mode = "tree"; // tree | files
+let currentDir = "(root)";
 let nodes = [];
 let links = [];
 let transform = { x: 0, y: 0, k: 1 };
@@ -125,49 +133,87 @@ let simTimer = null;
 
 function shortLabel(id, max) {
   max = max || 28;
-  if (id.length <= max) return id;
+  if (!id) return "";
+  if (id === "(root)") return "(root)";
   const base = id.split("/").pop();
   if (base.length <= max) return base;
   return base.slice(0, max - 1) + "…";
 }
 
-function buildFolderScene() {
+function folderInfo(id) {
+  return (DATA.folders && DATA.folders[id]) || null;
+}
+
+function buildTreeScene(dirId) {
   const folders = DATA.folders || {};
-  const edges = DATA.folder_edges || [];
-  nodes = Object.keys(folders).sort().map((id) => ({
-    id,
-    label: shortLabel(id, 32),
+  const info = folders[dirId] || { children: [], files: [] };
+  const childIds = info.children || [];
+  const nodeMap = {};
+
+  // Center node = current directory
+  nodeMap[dirId] = {
+    id: dirId,
+    label: shortLabel(dirId, 40),
     kind: "folder",
-    title: id + " (" + folders[id].file_count + " files)",
-    r: 14 + Math.min(18, Math.sqrt(folders[id].file_count || 1) * 2),
-  }));
+    title: dirId + " (current)",
+    r: 16,
+    isCurrent: true,
+  };
+
+  childIds.forEach((cid) => {
+    const c = folders[cid] || {};
+    nodeMap[cid] = {
+      id: cid,
+      label: shortLabel(cid, 36),
+      kind: "folder",
+      title: cid + " — " + (c.file_count || 0) + " files, " + ((c.children || []).length) + " subfolders",
+      r: 12 + Math.min(10, Math.sqrt((c.file_count || 1))),
+      isCurrent: false,
+    };
+  });
+
+  nodes = Object.values(nodeMap);
   const idset = new Set(nodes.map((n) => n.id));
-  links = edges
-    .filter((e) => idset.has(e.from) && idset.has(e.to))
-    .map((e) => ({
-      source: e.from,
-      target: e.to,
-      weight: e.weight || 1,
-    }));
+
+  // Tree edges: current → each child
+  links = childIds.map((cid) => ({
+    source: dirId,
+    target: cid,
+    weight: 2,
+    kind: "tree",
+  }));
+
+  // Import edges among visible folders (children + current)
+  (DATA.folder_edges || []).forEach((e) => {
+    if (idset.has(e.from) && idset.has(e.to) && e.from !== e.to) {
+      links.push({
+        source: e.from,
+        target: e.to,
+        weight: e.weight || 1,
+        kind: "imports",
+      });
+    }
+  });
 }
 
 function buildFileScene(folderId) {
   const folders = DATA.folders || {};
-  const info = folders[folderId];
-  if (!info) return;
+  const info = folders[folderId] || { files: [] };
   const fileSet = new Set(info.files || []);
   const nodeMap = {};
+
   (info.files || []).forEach((p) => {
     const meta = (DATA.nodes && DATA.nodes[p]) || {};
     nodeMap[p] = {
       id: p,
-      label: shortLabel(p, 36),
+      label: shortLabel(p, 40),
       kind: meta.kind === "test" ? "test" : "file",
-      title: p,
+      title: p + (meta.lang ? " [" + meta.lang + "]" : ""),
       r: 10,
       external: false,
     };
   });
+
   const fileEdges = (DATA.edges || []).filter(
     (e) => fileSet.has(e.from) || fileSet.has(e.to)
   );
@@ -176,7 +222,7 @@ function buildFileScene(folderId) {
       if (!nodeMap[p]) {
         nodeMap[p] = {
           id: p,
-          label: shortLabel(p, 36),
+          label: shortLabel(p, 40),
           kind: "external",
           title: p + " (outside " + folderId + ")",
           r: 9,
@@ -185,49 +231,95 @@ function buildFileScene(folderId) {
       }
     });
   });
+
   nodes = Object.values(nodeMap);
   links = fileEdges.map((e) => ({
     source: e.from,
     target: e.to,
     weight: 1,
+    kind: "imports",
   }));
 }
 
-function showFolders() {
-  mode = "folders";
-  currentFolder = null;
-  btnBack.disabled = true;
-  breadcrumb.innerHTML = "View: <strong>All folders</strong> — click a folder to see its files";
-  buildFolderScene();
-  restartSim();
+function updateChrome() {
+  const info = folderInfo(currentDir) || {};
+  const nFiles = (info.files || []).length;
+  const nKids = (info.children || []).length;
+  if (mode === "tree") {
+    breadcrumb.innerHTML =
+      "Folder tree at <strong>" + currentDir + "</strong> — " +
+      nKids + " subfolders · " + nFiles + " files here · grey=contains · orange dashed=imports";
+    btnFiles.disabled = nFiles === 0;
+    btnBack.disabled = currentDir === "(root)";
+  } else {
+    breadcrumb.innerHTML =
+      "Files in <strong>" + currentDir + "</strong> — orange arrows = imports/uses · dim = outside folder";
+    btnFiles.disabled = true;
+    btnBack.disabled = false;
+  }
 }
 
-function showFolder(folderId) {
+function showTree(dirId) {
+  mode = "tree";
+  currentDir = dirId || "(root)";
+  buildTreeScene(currentDir);
+  updateChrome();
+  restartSim(true);
+}
+
+function showFiles(folderId) {
   mode = "files";
-  currentFolder = folderId;
-  btnBack.disabled = false;
-  breadcrumb.innerHTML =
-    'View: folder <strong>' + folderId + "</strong> — files &amp; imports (dim nodes are outside)";
-  buildFileScene(folderId);
-  restartSim();
+  currentDir = folderId || currentDir;
+  buildFileScene(currentDir);
+  updateChrome();
+  restartSim(false);
 }
 
-btnBack.addEventListener("click", showFolders);
+btnBack.addEventListener("click", () => {
+  if (mode === "files") {
+    showTree(currentDir);
+    return;
+  }
+  const info = folderInfo(currentDir);
+  const parent = (info && info.parent != null) ? info.parent : "(root)";
+  showTree(parent || "(root)");
+});
 
-function restartSim() {
+btnFiles.addEventListener("click", () => {
+  showFiles(currentDir);
+});
+
+function restartSim(treeLayout) {
   const W = svg.clientWidth || 900;
   const H = svg.clientHeight || 600;
   const cx = W / 2;
   const cy = H / 2;
-  const n = nodes.length || 1;
-  nodes.forEach((node, i) => {
-    const angle = (2 * Math.PI * i) / n;
-    const rad = Math.min(W, H) * 0.28;
-    node.x = cx + Math.cos(angle) * rad + (Math.random() - 0.5) * 20;
-    node.y = cy + Math.sin(angle) * rad + (Math.random() - 0.5) * 20;
-    node.vx = 0;
-    node.vy = 0;
-  });
+
+  if (treeLayout && mode === "tree" && nodes.length) {
+    // Hierarchical: current at top, children in a row below
+    const cur = nodes.find((n) => n.isCurrent) || nodes[0];
+    const kids = nodes.filter((n) => !n.isCurrent);
+    cur.x = cx;
+    cur.y = H * 0.22;
+    cur.vx = 0; cur.vy = 0;
+    kids.forEach((n, i) => {
+      const span = Math.min(W * 0.8, Math.max(200, kids.length * 90));
+      n.x = cx - span / 2 + (kids.length === 1 ? span / 2 : (i * span) / (kids.length - 1));
+      n.y = H * 0.55;
+      n.vx = 0; n.vy = 0;
+    });
+  } else {
+    const n = nodes.length || 1;
+    nodes.forEach((node, i) => {
+      const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+      const rad = Math.min(W, H) * 0.28;
+      node.x = cx + Math.cos(angle) * rad;
+      node.y = cy + Math.sin(angle) * rad;
+      node.vx = 0;
+      node.vy = 0;
+    });
+  }
+
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   links.forEach((l) => {
     l.sourceNode = byId[l.source];
@@ -238,17 +330,16 @@ function restartSim() {
   let tick = 0;
   function step() {
     tick++;
-    const alpha = Math.max(0.02, 1 - tick / 180);
-    // repulsion
+    const alpha = Math.max(0.015, 1 - tick / 160);
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const a = nodes[i], b = nodes[j];
         let dx = a.x - b.x, dy = a.y - b.y;
         let dist2 = dx * dx + dy * dy || 1;
         let dist = Math.sqrt(dist2);
-        const minD = (a.r + b.r) * 3.2;
-        if (dist < minD * 3) {
-          const f = (minD * minD) / dist2 * alpha * 0.6;
+        const minD = (a.r + b.r) * 3.5;
+        if (dist < minD * 2.8) {
+          const f = (minD * minD) / dist2 * alpha * 0.55;
           dx = (dx / dist) * f;
           dy = (dy / dist) * f;
           a.vx += dx; a.vy += dy;
@@ -256,59 +347,82 @@ function restartSim() {
         }
       }
     }
-    // springs
     links.forEach((l) => {
       const a = l.sourceNode, b = l.targetNode;
       if (!a || !b) return;
       let dx = b.x - a.x, dy = b.y - a.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const ideal = 90 + Math.min(40, (l.weight || 1) * 4);
-      const f = (dist - ideal) * 0.04 * alpha;
+      const ideal = l.kind === "tree" ? 120 : 100;
+      const f = (dist - ideal) * 0.035 * alpha;
       dx = (dx / dist) * f;
       dy = (dy / dist) * f;
       a.vx += dx; a.vy += dy;
       b.vx -= dx; b.vy -= dy;
     });
-    // center gravity
     nodes.forEach((n) => {
-      n.vx += (cx - n.x) * 0.005 * alpha;
-      n.vy += (cy - n.y) * 0.005 * alpha;
-      n.vx *= 0.84;
-      n.vy *= 0.84;
+      if (treeLayout && mode === "tree" && n.isCurrent) {
+        // keep current near top
+        n.vy += (H * 0.22 - n.y) * 0.02;
+      }
+      n.vx += (cx - n.x) * 0.003 * alpha;
+      n.vy += (cy - n.y) * 0.002 * alpha;
+      n.vx *= 0.85;
+      n.vy *= 0.85;
       if (!n.fixed) {
         n.x += n.vx;
         n.y += n.vy;
       }
     });
     draw();
-    if (tick < 200) simTimer = requestAnimationFrame(step);
+    if (tick < 180) simTimer = requestAnimationFrame(step);
   }
   step();
+}
+
+function drawArrowHead(g, ns, x1, y1, x2, y2, color) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  // tip slightly before node edge
+  const tipX = x2 - ux * 12;
+  const tipY = y2 - uy * 12;
+  const ax = tipX - ux * 8 + uy * 4;
+  const ay = tipY - uy * 8 - ux * 4;
+  const bx = tipX - ux * 8 - uy * 4;
+  const by = tipY - uy * 8 + ux * 4;
+  const poly = document.createElementNS(ns, "polygon");
+  poly.setAttribute("points", tipX + "," + tipY + " " + ax + "," + ay + " " + bx + "," + by);
+  poly.setAttribute("fill", color);
+  g.appendChild(poly);
 }
 
 function draw() {
   const ns = "http://www.w3.org/2000/svg";
   while (svg.firstChild) svg.removeChild(svg.firstChild);
-  const g = document.createElementNS(ns, "g");
-  g.setAttribute(
+  const gRoot = document.createElementNS(ns, "g");
+  gRoot.setAttribute(
     "transform",
     "translate(" + transform.x + "," + transform.y + ") scale(" + transform.k + ")"
   );
-  svg.appendChild(g);
+  svg.appendChild(gRoot);
 
-  links.forEach((l) => {
+  // Draw tree links first, then import links
+  const ordered = links.slice().sort((a, b) => (a.kind === "imports" ? 1 : 0) - (b.kind === "imports" ? 1 : 0));
+  ordered.forEach((l) => {
     const a = l.sourceNode, b = l.targetNode;
     if (!a || !b) return;
     const line = document.createElementNS(ns, "line");
-    line.setAttribute("class", "link");
+    line.setAttribute("class", "link " + (l.kind || "imports"));
     line.setAttribute("x1", a.x);
     line.setAttribute("y1", a.y);
     line.setAttribute("x2", b.x);
     line.setAttribute("y2", b.y);
-    const w = Math.min(5, 1 + Math.log2((l.weight || 1) + 1));
+    const w = l.kind === "tree" ? 2.2 : Math.min(4, 1.2 + Math.log2((l.weight || 1) + 1));
     line.setAttribute("stroke-width", w);
-    // arrow via marker-end skip for simplicity; direction from a→b
-    g.appendChild(line);
+    gRoot.appendChild(line);
+    if (l.kind === "imports") {
+      drawArrowHead(gRoot, ns, a.x, a.y, b.x, b.y, "#f0a030");
+    }
   });
 
   nodes.forEach((n) => {
@@ -318,29 +432,49 @@ function draw() {
     group.style.opacity = n.external ? "0.55" : "1";
     const c = document.createElementNS(ns, "circle");
     c.setAttribute("r", n.r);
-    c.setAttribute("title", n.title || n.id);
+    if (n.isCurrent) {
+      c.setAttribute("stroke", "#3d9cf0");
+      c.setAttribute("stroke-width", "3");
+    }
+    const title = document.createElementNS(ns, "title");
+    title.textContent = n.title || n.id;
+    c.appendChild(title);
     const t = document.createElementNS(ns, "text");
     t.setAttribute("y", n.r + 12);
     t.textContent = n.label;
     group.appendChild(c);
     group.appendChild(t);
-    group.addEventListener("mousedown", (ev) => startDragNode(ev, n, group));
-    group.addEventListener("click", (ev) => {
+    group.addEventListener("mousedown", (ev) => startDragNode(ev, n));
+    group.addEventListener("click", () => {
       if (n._suppressClick) {
         n._suppressClick = false;
         return;
       }
-      if (mode === "folders" && n.kind === "folder") {
-        showFolder(n.id);
+      if (mode !== "tree" || n.kind !== "folder") return;
+      if (n.id === currentDir) {
+        // click current → show files if any
+        const info = folderInfo(n.id);
+        if (info && (info.files || []).length) showFiles(n.id);
+        return;
+      }
+      const info = folderInfo(n.id);
+      const kids = (info && info.children) || [];
+      const files = (info && info.files) || [];
+      if (kids.length) {
+        showTree(n.id);
+      } else if (files.length) {
+        showFiles(n.id);
+      } else {
+        showTree(n.id);
       }
     });
-    g.appendChild(group);
+    gRoot.appendChild(group);
   });
 }
 
 let dragNode = null;
 let dragStart = null;
-function startDragNode(ev, n, group) {
+function startDragNode(ev, n) {
   ev.stopPropagation();
   dragNode = n;
   n.fixed = true;
@@ -361,9 +495,7 @@ function startDragNode(ev, n, group) {
   const onUp = () => {
     if (dragNode) {
       dragNode.fixed = false;
-      if (dragStart && dragStart.moved) {
-        dragNode._suppressClick = true;
-      }
+      if (dragStart && dragStart.moved) dragNode._suppressClick = true;
     }
     dragNode = null;
     window.removeEventListener("mousemove", onMove);
@@ -392,16 +524,14 @@ svg.addEventListener(
   "wheel",
   (ev) => {
     ev.preventDefault();
-    const factor = ev.deltaY > 0 ? 0.9 : 1.1;
-    transform.k = Math.min(3, Math.max(0.25, transform.k * factor));
+    transform.k = Math.min(3, Math.max(0.25, transform.k * (ev.deltaY > 0 ? 0.9 : 1.1)));
     draw();
   },
   { passive: false }
 );
-
 window.addEventListener("resize", () => { draw(); });
 
-showFolders();
+showTree("(root)");
 </script>
 </body>
 </html>
@@ -427,10 +557,13 @@ def render_dep_graph_html(
                 "file_count": v["file_count"],
                 "test_count": v["test_count"],
                 "files": v["files"],
+                "children": v.get("children") or [],
+                "parent": v.get("parent"),
             }
             for k, v in agg["folders"].items()
         },
-        "folder_edges": agg["folder_edges"],
+        "tree_edges": agg.get("tree_edges") or [],
+        "folder_edges": agg.get("folder_edges") or [],
         "languages": list(graph.languages or []),
         "stats": {
             "files": len(graph.nodes),
@@ -439,7 +572,6 @@ def render_dep_graph_html(
         },
     }
     data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    # Prevent </script> breakout
     data_json = data_json.replace("<", "\\u003c")
     html = _HTML_TEMPLATE.replace("__DATA__", data_json)
     html = html.replace("__TITLE__", _escape_title(payload["title"]))
