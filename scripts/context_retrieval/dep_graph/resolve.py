@@ -96,8 +96,19 @@ _RESOLVE_SUFFIXES = (
 )
 
 
+# Dot-dirs we still want in the graph (repo layout like GitHub).
+_KEEP_DOT_DIRS = frozenset({".github"})
+
+
 def should_skip_dir(name: str) -> bool:
-    return name in _SKIP_DIR_NAMES or name.startswith(".")
+    if name in _KEEP_DOT_DIRS:
+        return False
+    if name in _SKIP_DIR_NAMES:
+        return True
+    # Skip other hidden/tooling dirs (.git, .venv, .idea, …)
+    if name.startswith("."):
+        return True
+    return False
 
 
 def should_skip_file(path: Path) -> bool:
@@ -249,7 +260,16 @@ def resolve_ref(
     # Root-absolute web path: /styles/app.css → try from repo root / public /
     if spec.startswith("/"):
         trimmed = spec.lstrip("/")
-        for prefix in ("", "public/", "static/", "src/"):
+        for prefix in (
+            "",
+            "public/",
+            "static/",
+            "src/",
+            "app/frontend/",
+            "app/backend/",
+            "frontend/",
+            "backend/",
+        ):
             for c in _candidate_files(root, prefix + trimmed):
                 try:
                     return c.resolve().relative_to(root.resolve()).as_posix()
@@ -274,6 +294,22 @@ def resolve_ref(
                 except ValueError:
                     continue
 
+    # Repo-relative pathish: "app/frontend/index.html", "data/uploads"
+    if "/" in spec and not spec.startswith(".") and re.fullmatch(
+        r"[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)+", spec
+    ):
+        for c in _candidate_files(root, spec):
+            try:
+                return c.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+        p = (root / spec).resolve()
+        try:
+            if p.is_file() and p.is_relative_to(root.resolve()):
+                return p.relative_to(root.resolve()).as_posix()
+        except (ValueError, OSError):
+            pass
+
     # Python-style dotted module → path (agents.extraction.foo → agents/extraction/foo.py)
     if re.fullmatch(r"[A-Za-z_][\w.]*", spec):
         dotted = spec.replace(".", "/")
@@ -297,6 +333,103 @@ def resolve_ref(
                     continue
 
     return None
+
+
+def _as_repo_dir(root: Path, abs_path: Path) -> str | None:
+    try:
+        rel = abs_path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+    if abs_path.is_dir():
+        return rel if rel != "." else "(root)"
+    return None
+
+
+def resolve_ref_or_dir(
+    root: Path,
+    from_file: Path,
+    specifier: str,
+    aliases: list[tuple[str, str]] | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve specifier to (file_rel, dir_rel). At most one is set."""
+    aliases = aliases or []
+    file_tgt = resolve_ref(root, from_file, specifier, aliases)
+    if file_tgt:
+        return file_tgt, None
+
+    spec = (specifier or "").strip().strip("'\"")
+    if not spec or spec.startswith("node:") or spec.startswith("data:") or spec.startswith("http"):
+        return None, None
+    if spec.startswith("//") or spec.startswith("#"):
+        return None, None
+    spec = spec.split("?", 1)[0].split("#", 1)[0]
+    if not spec:
+        return None, None
+
+    root_r = root.resolve()
+
+    if spec.startswith("."):
+        target = (from_file.parent / spec).resolve()
+        d = _as_repo_dir(root, target)
+        if d and d != "(root)":
+            return None, d
+        return None, None
+
+    if spec.startswith("/"):
+        trimmed = spec.lstrip("/")
+        for prefix in (
+            "",
+            "public/",
+            "static/",
+            "src/",
+            "app/frontend/",
+            "app/backend/",
+            "frontend/",
+            "backend/",
+        ):
+            cand = (root / prefix / trimmed).resolve()
+            d = _as_repo_dir(root, cand)
+            if d and d != "(root)":
+                return None, d
+        return None, None
+
+    if "/" in spec and re.fullmatch(r"[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)+", spec):
+        cand = (root / spec).resolve()
+        d = _as_repo_dir(root, cand)
+        if d and d != "(root)":
+            return None, d
+        # Also accept directory that only exists as a path prefix we know
+        # (e.g. data/uploads when PDFs were skipped but dir shell exists)
+        try:
+            if cand.is_relative_to(root_r) and (root / spec).is_dir():
+                return None, spec.replace("\\", "/").rstrip("/")
+        except (ValueError, OSError):
+            pass
+
+    # Single path segment from Path chains: APP_DIR / "frontend"
+    if re.fullmatch(r"[A-Za-z0-9_.@+-]+", spec) and spec not in {
+        "utf-8",
+        "ascii",
+        "latin-1",
+        "POST",
+        "GET",
+        "PUT",
+        "DELETE",
+        "PATCH",
+    }:
+        # Prefer sibling / parent dirs near the source file, then repo root
+        for base in [from_file.parent, *list(from_file.parents)[:4], root]:
+            try:
+                if not str(base.resolve()).startswith(str(root_r)):
+                    continue
+            except OSError:
+                continue
+            cand = (base / spec).resolve()
+            d = _as_repo_dir(root, cand)
+            if d and d != "(root)":
+                return None, d
+
+    return None, None
 
 
 # Back-compat name used by older callers/tests

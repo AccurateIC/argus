@@ -94,10 +94,16 @@ with tempfile.TemporaryDirectory() as tmp:
     out = Path(tmp) / "dep-graph.html"
     write_dep_graph_html(g, out, folder_depth=2, title="mini")
     html = out.read_text(encoding="utf-8")
-    assert "(root)" in html
-    assert "showTree" in html
-    assert "Show files" in html
-    assert "DATA" in html
+    assert "How to read this graph" in html
+    assert "Folder:" in html
+    assert "Pipeline order:" in html
+    assert "Uses / imports:" in html
+    assert "Contains:" in html
+    assert "Argus Repository Dependency Graph" in html
+    assert "graph-data" in html
+    assert "showTree" not in html  # static flowchart, not clickable tree UI
+    # Root box uses repo name when provided
+    assert "mini_app" in html or "AccurateIC" in html or "repo" in html
     # single file deliverable
     assert out.is_file()
     assert len(list(Path(tmp).iterdir())) == 1

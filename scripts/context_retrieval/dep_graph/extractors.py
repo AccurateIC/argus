@@ -41,6 +41,20 @@ _HTML_RE = re.compile(
 # Relative path literals that often appear in code/config
 _REL_PATH_RE = re.compile(r"""['"](\.\.?/[^'"]+)['"]""")
 
+# Path-like strings: "app/frontend", "data/uploads", "frontend/index.html"
+_PATHISH_RE = re.compile(
+    r"""['"]((?:[A-Za-z0-9_.-]+/)+\.?[A-Za-z0-9_.-]+(?:\.[A-Za-z0-9]+)?)['"]"""
+)
+
+_FALSE_PATH_PREFIXES = (
+    "http://",
+    "https://",
+    "application/",
+    "text/",
+    "image/",
+    "multipart/",
+)
+
 
 def extract_js_specifiers(source: str) -> list[str]:
     specs: list[str] = []
@@ -114,6 +128,50 @@ def extract_generic_rel_paths(source: str) -> list[str]:
     return [m.group(1) for m in _REL_PATH_RE.finditer(source)]
 
 
+def extract_pathish_strings(source: str) -> list[str]:
+    """Catch repo-relative path strings used in Path(...), mounts, docs, etc."""
+    out: list[str] = []
+    for m in _PATHISH_RE.finditer(source):
+        s = m.group(1)
+        if any(s.startswith(p) for p in _FALSE_PATH_PREFIXES):
+            continue
+        if s.count("/") < 1:
+            continue
+        # skip version-like or URL-ish
+        if "://" in s:
+            continue
+        out.append(s)
+    return out
+
+
+# REPO_ROOT / "data" / "uploads" / run_id   →  data/uploads
+# APP_DIR / "frontend"                     →  frontend (resolved from file later)
+_PATH_CHAIN_RE = re.compile(
+    r"""(?x)
+    (?:Path\s*\([^)]*\)|[A-Za-z_][\w.]*)
+    (?P<chain>(?:\s*/\s*['"][^'"]+['"]){1,8})
+    """
+)
+_PATH_SEG_RE = re.compile(r"""['"]([^'"]+)['"]""")
+
+
+def extract_path_chains(source: str) -> list[str]:
+    """Join successive Path / \"seg\" segments into repo-ish path strings."""
+    out: list[str] = []
+    for m in _PATH_CHAIN_RE.finditer(source):
+        segs = _PATH_SEG_RE.findall(m.group("chain"))
+        # Keep only simple path segments (not f-strings / variables)
+        clean = [s for s in segs if s and "/" not in s and not s.startswith("{")]
+        if not clean:
+            continue
+        joined = "/".join(clean)
+        out.append(joined)
+        # Also emit prefixes: data, data/uploads
+        for i in range(1, len(clean)):
+            out.append("/".join(clean[:i]))
+    return out
+
+
 def extract_specifiers_for_file(path: Path, source: str) -> list[str]:
     suf = path.suffix.lower()
     specs: list[str] = []
@@ -128,8 +186,10 @@ def extract_specifiers_for_file(path: Path, source: str) -> list[str]:
         specs.extend(extract_css_specifiers(source))
     if suf in {".py", ".pyi"}:
         specs.extend(extract_python_specifiers(source, path))
+        specs.extend(extract_path_chains(source))
     # Always harvest obvious relative path strings
     specs.extend(extract_generic_rel_paths(source))
+    specs.extend(extract_pathish_strings(source))
     # Dedupe preserve order
     seen: set[str] = set()
     out: list[str] = []

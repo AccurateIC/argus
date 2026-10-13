@@ -3,3 +3,5 @@ node_modules/
 *.log
 *.pyc
 .pycache/
+# Never keep other app checkouts inside Argus — graphs go to ~/.cache/argus/dep-graphs/
+.tmp-*/
