@@ -109,6 +109,20 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${OWNER}/argus.git" \
             "$DEST"
 
+      # Auto-build one interactive dep-graph.html per PR head on the runner disk
+      # only (not posted to GitHub UI). Soft-fail so graph issues never block review.
+      - name: Build dependency graph (PR)
+        if: needs.resolve.outputs.backend == 'ollama'
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number || github.event.issue.number }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          chmod +x scripts/build_pr_dep_graph.sh
+          ./scripts/build_pr_dep_graph.sh
+
       - name: Run Argus (Ollama)
         if: needs.resolve.outputs.backend == 'ollama'
         env:
