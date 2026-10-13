@@ -117,6 +117,23 @@ def extract_python_specifiers(source: str, from_file: Path) -> list[str]:
                 specs.append(rel.replace("//", "/"))
             elif mod:
                 specs.append(mod)  # absolute dotted — resolve_ref may map to file
+                # from pkg import submodule → also try pkg.submodule
+                for alias in node.names:
+                    name = alias.name or ""
+                    if not name or name == "*":
+                        continue
+                    # skip obvious non-module names (ALL_CAPS constants, ClassNames)
+                    if name.isupper() and "_" in name:
+                        continue
+                    if name[:1].isupper():
+                        continue
+                    specs.append(f"{mod}.{name}")
+            # relative from . import foo → ./foo
+            if level > 0 and not mod:
+                for alias in node.names:
+                    name = alias.name or ""
+                    if name and name != "*":
+                        specs.append("./" + name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name:

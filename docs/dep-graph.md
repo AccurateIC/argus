@@ -44,16 +44,18 @@ Or on the runner: `python3 -m http.server 8765` in that folder, and on your lapt
 
 ## What you see in the HTML
 
-Static left-to-right diagram (not clickable), polished overview style:
+Left-to-right diagram with **instant folder drill-down** (no animations):
 
 1. **Header** — “Argus Repository Dependency Graph” plus repo / commit / file counts.
 2. **Root card** — repository name, commit, file & folder counts.
-3. **Blue folders · teal files · purple numbered pipeline stages**.
-4. **Solid light arrows** = Contains · **Dashed blue** = Imports/uses · **Purple** = Handoff order.
-5. **Legend bar** at the bottom.
-6. One stage expanded as an example when a pipeline group is detected.
+3. **Col 1** — every top-level folder/file; **col 2** — children of each (packages, `config/`, `launch/`, …).
+4. **Col 3** — one package expanded deeper as an example (others follow the same pattern).
+5. **Blue folders · teal files · purple numbered pipeline stages** (when a pipeline is detected).
+6. **Solid light arrows** = Contains · **Dashed blue** = Uses/imports · **Purple ↓** = Pipeline order.
+7. **Legend bar** at the bottom.
+8. **Click any folder** to collapse / expand its children in place (full tree stays on screen). **Expand all** resets.
 
-No CDN — pure SVG embedded in one HTML file.
+No CDN — pure SVG + small inline JS in one HTML file.
 
 ## Manual CLI (optional / debugging only)
 
