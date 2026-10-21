@@ -36,6 +36,10 @@ on:
         pr-number:
           description: PR number
           required: true
+        pr-author:
+          description: GitHub login of the PR author
+          required: false
+          type: string
 
 permissions:
   contents: read
