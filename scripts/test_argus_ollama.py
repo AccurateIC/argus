@@ -27,6 +27,7 @@ from argus_ollama import (  # noqa: E402
     format_summary,
     is_github_diff_too_large,
     is_review_payload,
+    ledger_item_as_finding,
     md_table_cell,
     normalize_findings,
     pack_file_batches,
@@ -379,7 +380,7 @@ _no_persist_incomplete = format_summary(
 )
 assert "<!-- neubodhi-findings" not in _no_persist_incomplete
 
-# Classify: file gone from PR diff → resolved; uncovered path → not_rechecked.
+# Classify: file gone from PR diff → needs verification (not inferred resolved).
 _prev = findings_to_ledger(
     [
         {
@@ -410,8 +411,9 @@ _buckets = classify_previous_findings(
     current_findings=[],
     use_model_recheck=False,
 )
-assert len(_buckets["resolved"]) == 1 and _buckets["resolved"][0]["path"] == "gone.py"
-assert len(_buckets["not_rechecked"]) == 1 and _buckets["not_rechecked"][0]["path"] == "skip_me.py"
+assert _buckets["resolved"] == [], _buckets
+assert len(_buckets["not_rechecked"]) == 2, _buckets
+assert {x["path"] for x in _buckets["not_rechecked"]} == {"gone.py", "skip_me.py"}
 
 # Covered + matching current finding → still_open via heuristic.
 _prev2 = findings_to_ledger(
@@ -444,6 +446,84 @@ _buckets2 = classify_previous_findings(
 )
 assert len(_buckets2["still_open"]) == 1, _buckets2
 
+# Bug #9879: absence from latest review output must NOT imply resolved.
+_prev3 = findings_to_ledger(
+    [
+        {
+            "severity": "major",
+            "skill": "correctness",
+            "location": "a.py:10",
+            "finding": "Invite lookup ignores tenant scope",
+            "suggested_fix": "",
+        }
+    ]
+)
+_full3 = (
+    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+    "@@ -1 +1 @@\n-x\n+print('unrelated change')\n"
+)
+_buckets3 = classify_previous_findings(
+    _prev3,
+    full_diff=_full3,
+    covered_paths={"a.py"},
+    comments_blob="",
+    current_findings=[],  # new pass missed the issue
+    use_model_recheck=False,
+)
+assert _buckets3["resolved"] == [], _buckets3
+assert len(_buckets3["not_rechecked"]) == 1, _buckets3
+assert _buckets3["not_rechecked"][0]["path"] == "a.py"
+
+# Distinctive tokens still on added lines → still_open (positive evidence issue remains).
+_prev4 = findings_to_ledger(
+    [
+        {
+            "severity": "major",
+            "skill": "correctness",
+            "location": "a.py:1",
+            "finding": "TenantScopeFilter missing on InviteLookup query",
+            "suggested_fix": "",
+        }
+    ]
+)
+_full4 = (
+    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+    "@@ -1 +1 @@\n-x\n+InviteLookup without TenantScopeFilter\n"
+)
+_buckets4 = classify_previous_findings(
+    _prev4,
+    full_diff=_full4,
+    covered_paths={"a.py"},
+    comments_blob="",
+    current_findings=[],
+    use_model_recheck=False,
+)
+assert len(_buckets4["still_open"]) == 1, _buckets4
+assert _buckets4["resolved"] == []
+
+# Explicit author waiver is the only non-model path that clears a prior finding.
+_prev5 = findings_to_ledger(
+    [
+        {
+            "severity": "major",
+            "skill": "security",
+            "location": "a.py:1",
+            "finding": "raw SQL in reports endpoint",
+            "suggested_fix": "",
+        }
+    ]
+)
+_buckets5 = classify_previous_findings(
+    _prev5,
+    full_diff=_full3,
+    covered_paths={"a.py"},
+    comments_blob="Author: intentional ignore raw SQL in reports — accepted pattern",
+    current_findings=[],
+    use_model_recheck=False,
+)
+# Waiver matching is best-effort; if not waived, must still not be false-resolved.
+assert _buckets5["resolved"] == [], _buckets5
+
 # New findings omit ones already listed as still open.
 _new_only = subtract_matching_findings(
     [
@@ -472,17 +552,21 @@ _follow_body = format_summary(
     [],
     "COMMENT",
     followup={
-        "resolved": _buckets["resolved"],
+        "resolved": [],
         "still_open": _buckets2["still_open"],
-        "not_rechecked": [],
+        "not_rechecked": _buckets3["not_rechecked"],
         "waived": [],
         "new": _new_only,
     },
-    persist_findings=_new_only,
+    persist_findings=_new_only + [ledger_item_as_finding(x) for x in _buckets3["not_rechecked"]],
 )
-assert "Resolved since last review" in _follow_body
 assert "Still open" in _follow_body
+assert "Needs verification" in _follow_body
 assert "New findings" in _follow_body
-assert "Open findings (still open + new)" in _follow_body
+assert "Open findings (still open + needs verification + new)" in _follow_body
+# Unclear prior findings must remain in the ledger for the next run.
+_persist_marker = parse_findings_marker(_follow_body)
+assert _persist_marker is not None
+assert any("tenant" in (x.get("finding") or "").lower() for x in _persist_marker), _persist_marker
 
 print("ok")

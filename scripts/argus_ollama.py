@@ -851,8 +851,18 @@ def subtract_matching_findings(
     return out
 
 
+# Follow-up statuses the harness persists / displays.
+# "resolved" requires positive evidence of a fix — never inferred from absence.
+_FOLLOWUP_STATUSES = frozenset({"resolved", "still_open", "not_rechecked"})
+
+
 def heuristic_finding_status(item: dict, file_hunk: str, current_findings: list[dict]) -> str:
-    """Best-effort resolved/still_open without a model call (file must be covered)."""
+    """Best-effort status without a model call (file must be covered).
+
+    Absence from the latest review output is *not* treated as resolved (bug #9879).
+    Returns still_open when there is evidence the issue remains; otherwise
+    not_rechecked (needs verification).
+    """
     path = str(item.get("path") or "")
     text = str(item.get("finding") or "")
     if any(findings_roughly_match(path, text, f) for f in current_findings):
@@ -870,7 +880,7 @@ def heuristic_finding_status(item: dict, file_hunk: str, current_findings: list[
     hits = sum(1 for t in tokens[:12] if t.lower() in added_l)
     if hits >= 2:
         return "still_open"
-    return "resolved"
+    return "not_rechecked"
 
 
 def recheck_findings_with_ollama(
@@ -888,8 +898,12 @@ def recheck_findings_with_ollama(
     ]
     system = (
         "You re-check previous code-review findings against the current PR diff. "
-        "Return ONLY JSON. status=still_open if the same problem is still visible "
-        "in the diff; status=resolved if the issue was fixed or removed. "
+        "Return ONLY JSON. "
+        "status=still_open if the same problem is still visible or likely unchanged. "
+        "status=resolved ONLY when the diff clearly shows the issue was fixed or the "
+        "buggy code was removed — cite that evidence mentally before choosing resolved. "
+        "status=needs_verification when the diff is unrelated, incomplete, or you cannot "
+        "tell. Do NOT mark resolved merely because the finding is absent from a new review. "
         "Do not invent new findings."
     )
     user = (
@@ -897,7 +911,8 @@ def recheck_findings_with_ollama(
         f"{json.dumps(catalog, ensure_ascii=False)}\n\n"
         "Current diff for those files only:\n```diff\n"
         f"{files_diff[:120_000]}\n```\n\n"
-        'Return JSON: {"results":[{"id":"...","status":"resolved"|"still_open"}]}'
+        'Return JSON: {"results":[{"id":"...","status":'
+        '"resolved"|"still_open"|"needs_verification"}]}'
     )
     recheck_schema = {
         "type": "object",
@@ -912,7 +927,7 @@ def recheck_findings_with_ollama(
                         "id": {"type": "string"},
                         "status": {
                             "type": "string",
-                            "enum": ["resolved", "still_open"],
+                            "enum": ["resolved", "still_open", "needs_verification"],
                         },
                     },
                 },
@@ -942,7 +957,9 @@ def recheck_findings_with_ollama(
             continue
         fid = str(row.get("id") or "")
         status = str(row.get("status") or "").lower().strip()
-        if fid and status in ("resolved", "still_open"):
+        if status == "needs_verification":
+            status = "not_rechecked"
+        if fid and status in _FOLLOWUP_STATUSES:
             out[fid] = status
     return out
 
@@ -958,7 +975,11 @@ def classify_previous_findings(
     model: str = "",
     use_model_recheck: bool = True,
 ) -> dict[str, list[dict]]:
-    """Split prior findings into resolved / still_open / not_rechecked / waived."""
+    """Split prior findings into resolved / still_open / not_rechecked / waived.
+
+    Resolved is evidence-gated: never inferred solely because a finding was absent
+    from the latest model output or because a path left the PR diff.
+    """
     buckets: dict[str, list[dict]] = {
         "resolved": [],
         "still_open": [],
@@ -982,8 +1003,8 @@ def classify_previous_findings(
             buckets["not_rechecked"].append(item)
             continue
         if path not in path_map:
-            # File no longer appears in the PR diff → treated as fixed/reverted.
-            buckets["resolved"].append(item)
+            # File no longer in the PR diff — not proof the issue was fixed.
+            buckets["not_rechecked"].append(item)
             continue
         if path not in covered_paths:
             buckets["not_rechecked"].append(item)
@@ -1017,17 +1038,22 @@ def classify_previous_findings(
             for it in needs_recheck:
                 fid = str(it.get("id") or "")
                 st = status_by_id.get(fid)
-                if st not in ("resolved", "still_open"):
+                if st not in _FOLLOWUP_STATUSES:
                     st = heuristic_finding_status(
                         it, path_map.get(str(it.get("path") or ""), ""), current_findings
                     )
+                # Model "resolved" without corroboration from current findings is
+                # accepted only when the model explicitly chose it; heuristic never
+                # produces resolved. Missing/unknown → not_rechecked above.
+                if st not in _FOLLOWUP_STATUSES:
+                    st = "not_rechecked"
                 buckets[st].append(it)
 
     return buckets
 
 
 def format_followup_sections(followup: dict[str, list[dict]]) -> list[str]:
-    """Markdown sections for resolved / still open / not rechecked / new."""
+    """Markdown sections for resolved / still open / needs verification / new."""
     resolved = followup.get("resolved") or []
     still_open = followup.get("still_open") or []
     not_rechecked = followup.get("not_rechecked") or []
@@ -1039,7 +1065,11 @@ def format_followup_sections(followup: dict[str, list[dict]]) -> list[str]:
     lines = [
         f"**Follow-up:** {len(resolved)} resolved · {len(still_open)} still open · "
         f"{len(new)} new"
-        + (f" · {len(not_rechecked)} not rechecked" if not_rechecked else "")
+        + (
+            f" · {len(not_rechecked)} needs verification"
+            if not_rechecked
+            else ""
+        )
         + (f" · {len(waived)} waived" if waived else ""),
         "",
     ]
@@ -1055,8 +1085,9 @@ def format_followup_sections(followup: dict[str, list[dict]]) -> list[str]:
         lines += ["### 🔴 Still open"] + _simple_table(still_open, with_skill=False) + [""]
     if not_rechecked:
         lines += [
-            "### ⏸️ Not rechecked",
-            "_These files were outside this run’s covered window — not treated as fixed._",
+            "### ⏸️ Needs verification",
+            "_Not enough evidence the issue was fixed — kept open for the next review "
+            "(not treated as resolved)._",
             "",
         ] + _simple_table(not_rechecked, with_skill=False) + [""]
     if waived:
@@ -1554,9 +1585,9 @@ def format_summary(
     if coverage_md:
         lines += [coverage_md.rstrip(), ""]
     # Keep a combined table so the gate/verdict is self-contained.
-    # When follow-up sections exist, this table is open items only (still open + new).
+    # When follow-up sections exist: still open + needs verification + new.
     heading = (
-        "### Open findings (still open + new)"
+        "### Open findings (still open + needs verification + new)"
         if followup
         else "### All findings (combined)"
     )
@@ -2269,10 +2300,13 @@ Description:
             model=model,
             use_model_recheck=True,
         )
-        new_findings = subtract_matching_findings(findings, buckets["still_open"])
+        # Avoid double-listing when the new pass rediscovers a prior open/unclear item.
+        carry_ids = buckets["still_open"] + buckets["not_rechecked"]
+        new_findings = subtract_matching_findings(findings, carry_ids)
         still_open_as = [ledger_item_as_finding(x) for x in buckets["still_open"]]
-        # Verdict / open table: still-open prior items + genuinely new ones.
-        findings = still_open_as + new_findings
+        needs_verify_as = [ledger_item_as_finding(x) for x in buckets["not_rechecked"]]
+        # Display + gate: still-open + needs-verification + new (never drop unclear priors).
+        findings = still_open_as + needs_verify_as + new_findings
         findings.sort(key=lambda x: SEV_RANK.get(x.get("severity") or "nit", 99))
         followup_view = {
             "resolved": buckets["resolved"],
@@ -2281,8 +2315,8 @@ Description:
             "waived": buckets["waived"],
             "new": new_findings,
         }
-        # Next run should only track items that are still open (plus new). Never
-        # persist when coverage is incomplete — handled inside format_summary.
+        # Persist still-open, needs-verification, and new — not false-resolved drops.
+        # Incomplete coverage never persists — handled inside format_summary.
         persist_for_next = findings
         print(
             "neubodhi-ollama: follow-up "
